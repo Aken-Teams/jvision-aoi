@@ -1,0 +1,16 @@
+services:
+  api:
+    environment:
+      CAMERA_GATEWAY_URL: http://camera-gateway:8010
+  camera-gateway:
+    image: jvision-aoi-backend:0.1
+    build:
+      context: ./backend
+      args:
+        INSTALL_AI: ${INSTALL_AI:-true}
+    env_file: .env
+    command: ['uvicorn','app.camera_service:app','--host','0.0.0.0','--port','8010','--no-access-log']
+    restart: unless-stopped
+    networks: [internal, camera-lan]
+networks:
+  camera-lan: {}

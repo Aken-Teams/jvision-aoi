@@ -1,0 +1,21 @@
+services:
+  api:
+    environment:
+      TRAIN_DEVICE: '0'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+  worker:
+    environment:
+      TRAIN_DEVICE: '0'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -1,0 +1,23 @@
+services:
+  api:
+    environment:
+      VLM_BASE_URL: http://vlm:8000/v1
+      VLM_MODEL: local-vlm
+      VLM_ALLOWED_HOSTS: vlm
+  vlm:
+    image: vllm/vllm-openai:v0.10.1
+    restart: unless-stopped
+    command: ['--model','/models/vlm','--served-model-name','local-vlm','--max-model-len','4096','--gpu-memory-utilization','0.35']
+    environment:
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    volumes: ['./weights/vlm:/models/vlm:ro']
+    networks: [internal]
+    shm_size: 2gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

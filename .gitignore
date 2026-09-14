@@ -1,0 +1,9 @@
+.env
+**/node_modules/
+**/.next/
+**/__pycache__/
+**/.pytest_cache/
+**/*.tsbuildinfo
+backend/data/
+weights/*
+!weights/README.md

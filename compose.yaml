@@ -1,0 +1,97 @@
+name: jvision-aoi
+x-backend: &backend
+  build:
+    context: ./backend
+    args:
+      INSTALL_AI: ${INSTALL_AI:-true}
+  image: jvision-aoi-backend:0.1
+  restart: unless-stopped
+  env_file: .env
+  environment: &env
+    DATABASE_URL: postgresql+psycopg://aoi:${POSTGRES_PASSWORD}@postgres:5432/aoi
+    DATA_DIR: /data
+    REDIS_URL: redis://redis:6379/0
+    S3_ENDPOINT: http://minio:9000
+    S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+    S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    S3_BUCKET: aoi
+    YOLO_WEIGHTS: /weights/yolo11n.pt
+    TRAIN_DEVICE: ${TRAIN_DEVICE:-cpu}
+    SYNC_TRAIN: 'false'
+  volumes:
+    - aoi-data:/data
+    - ./weights:/weights:ro
+  networks: [internal]
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+    init-storage: {condition: service_completed_successfully}
+services:
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports: ['${BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3000}:3000']
+    networks: [internal]
+    depends_on:
+      api: {condition: service_healthy}
+  api:
+    <<: *backend
+    healthcheck:
+      test: ['CMD','python','-c',"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+  worker:
+    <<: *backend
+    command: ['rq','worker','gpu','--url','redis://redis:6379/0','--with-scheduler']
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aoi
+      POSTGRES_DB: aoi
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    networks: [internal]
+    healthcheck:
+      test: ['CMD-SHELL','pg_isready -U aoi -d aoi']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server','--appendonly','yes']
+    volumes: [redis-data:/data]
+    networks: [internal]
+    healthcheck:
+      test: ['CMD','redis-cli','ping']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: ['server','/data']
+    volumes: [minio-data:/data]
+    networks: [internal]
+  init-storage:
+    build: {context: ./backend, args: {INSTALL_AI: '${INSTALL_AI:-true}'}}
+    image: jvision-aoi-backend:0.1
+    user: '0:0'
+    command: ['python','-c',"import os,time,boto3; from pathlib import Path; os.chown('/data',10001,10001); c=boto3.client('s3',endpoint_url='http://minio:9000',aws_access_key_id=os.environ['MINIO_ROOT_USER'],aws_secret_access_key=os.environ['MINIO_ROOT_PASSWORD']); exec('for i in range(60):\n try:\n  buckets=c.list_buckets()[\"Buckets\"]; break\n except Exception:\n  time.sleep(1)\nelse: raise RuntimeError(\"MinIO not ready\")'); c.create_bucket(Bucket='aoi') if not any(b['Name']=='aoi' for b in buckets) else None"]
+    env_file: .env
+    volumes: [aoi-data:/data]
+    networks: [internal]
+    depends_on: [minio]
+networks:
+  internal:
+    internal: true
+volumes:
+  aoi-data:
+  postgres-data:
+  minio-data:
+  redis-data:

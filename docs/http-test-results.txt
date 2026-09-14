@@ -1,0 +1,2 @@
+{'project_id': '50e8b35f-ce5a-46f2-95a5-881cf15748dc', 'job': 'completed', 'result': 'REVIEW', 'metrics': {'validation': {'accuracy': 1.0, 'precision': 1.0, 'recall': 1.0, 'f1': 1.0, 'labels': ['NG', 'OK'], 'confusion_matrix': [[4, 0], [0, 4]]}, 'test': {'accuracy': 1.0, 'precision': 1.0, 'recall': 1.0, 'f1': 1.0, 'labels': ['NG', 'OK'], 'confusion_matrix': [[4, 0], [0, 4]]}}}
+Production frontend -> API -> training -> deployment -> inspection HTTP flow passed.

@@ -1,0 +1,302 @@
+[
+  {
+    "file": "OK/ok-001.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-002.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-003.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-004.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-005.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-006.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-007.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-008.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-009.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-010.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-011.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-012.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-013.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-014.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-015.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-016.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-017.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-018.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-019.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-020.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-021.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-022.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-023.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-024.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-025.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-026.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-027.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-028.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-029.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "OK/ok-030.png",
+    "label": "OK",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-001.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-002.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-003.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-004.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-005.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-006.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-007.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-008.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-009.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-010.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-011.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-012.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-013.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-014.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-015.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-016.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-017.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-018.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-019.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-020.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-021.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-022.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-023.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-024.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-025.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-026.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-027.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-028.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-029.png",
+    "label": "NG",
+    "synthetic": true
+  },
+  {
+    "file": "NG/ng-030.png",
+    "label": "NG",
+    "synthetic": true
+  }
+]
