@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 from .core import *
 from .jobs import split_snapshot, train_job
 from .adapters import ADAPTERS
-from . import vlm
+from . import vlm, runtime
 
 @asynccontextmanager
 async def lifespan(app):
@@ -53,25 +53,106 @@ def logout(response:Response,u=Depends(auth)):
 @app.get('/api/v1/me')
 def me(u=Depends(auth)): return {'username':u['username'],'id':u['id']}
 
+def valid_labels(labels):
+    return len(set(labels))==len(labels) and all(x.strip() and len(x)<=60 for x in labels)
 class ProjectIn(BaseModel):
     name:str=Field(min_length=1,max_length=120)
     task:Literal['classification','detection']='classification'
     labels:list[str]=Field(default=['OK','NG'],min_length=2,max_length=30)
+    adapter:Literal['transfer','baseline','cnn','yolo']|None=None
     @model_validator(mode='after')
     def valid(self):
-        if len(set(self.labels))!=len(self.labels) or any(not x.strip() or len(x)>60 for x in self.labels): raise ValueError('類別不可重複或空白')
+        if not valid_labels(self.labels): raise ValueError('類別不可重複或空白')
+        if self.adapter and (self.task=='detection')!=(self.adapter=='yolo'): raise ValueError('任務與模型類型不相容')
         if 'OK' not in self.labels: raise ValueError('須包含 OK 類別')
         return self
 @app.get('/api/v1/projects')
 def projects(u=Depends(auth)): return [p for p in rows('project') if p['owner']==u['id']]
 @app.post('/api/v1/projects')
 def create_project(b:ProjectIn,u=Depends(auth)): return new('project',{**b.model_dump(),'owner':u['id']})
+class ProjectPatch(BaseModel):
+    name:str=Field(min_length=1,max_length=120)
+@app.patch('/api/v1/projects/{pid}')
+def project_rename(pid:str,b:ProjectPatch,u=Depends(auth)):
+    own(pid,u); return update(pid,name=b.name.strip() or '未命名專案')
+
+ARCHIVE_FORMAT='jvision-aoi-project'
+@app.get('/api/v1/projects/{pid}/archive')
+def project_export(pid:str,u=Depends(auth)):
+    # Samples and annotations only; model versions stay bound to this server's audit trail.
+    import zipfile,tempfile
+    p=own(pid,u); images=live_images(pid)
+    manifest={'format':ARCHIVE_FORMAT,'version':1,'name':p['name'],'task':p['task'],'labels':p['labels'],'adapter':p.get('adapter'),
+              'images':[{'file':f'images/{x["id"]}.png','label':x['label'],'group':x['group'],'boxes':x['boxes'],'reviewed':x['reviewed']} for x in images]}
+    tmp=tempfile.NamedTemporaryFile(suffix='.zip',delete=False)
+    with zipfile.ZipFile(tmp,'w',zipfile.ZIP_STORED) as z:
+        z.writestr('project.json',json.dumps(manifest,ensure_ascii=False,indent=2))
+        for x,m in zip(images,manifest['images']): z.writestr(m['file'],blob(x['key']))
+    tmp.close()
+    from starlette.background import BackgroundTask
+    return FileResponse(tmp.name,filename=f'{p["name"][:60]}.aoi.zip',media_type='application/zip',background=BackgroundTask(os.unlink,tmp.name))
+@app.post('/api/v1/projects/import')
+async def project_import(file:UploadFile=File(...),u=Depends(auth)):
+    import zipfile
+    try:
+        z=zipfile.ZipFile(file.file)
+        info=z.getinfo('project.json')
+        if info.file_size>20*1024*1024: raise ValueError()
+        m=json.loads(z.read(info))
+        if m.get('format')!=ARCHIVE_FORMAT or not isinstance(m.get('images'),list) or len(m['images'])>20000: raise ValueError()
+        project=ProjectIn(name=str(m.get('name') or '匯入專案')[:120],task=m.get('task','classification'),labels=m.get('labels'),adapter=m.get('adapter'))
+    except Exception: raise HTTPException(422,'不是有效的 JVision 專案檔')
+    entries=[]
+    for x in m['images']:
+        try:
+            item=z.getinfo(str(x['file']))
+            if item.file_size>20*1024*1024 or x['label'] not in project.labels: raise ValueError()
+            boxes=[Box(**b).model_dump() for b in x.get('boxes',[])]
+            if any(b['label'] not in project.labels or b['label']=='OK' for b in boxes): raise ValueError()
+            entries.append((item,x,boxes))
+        except Exception: raise HTTPException(422,f'專案檔影像資料無效：{str(x.get("file",""))[:80]}')
+    p=new('project',{**project.model_dump(),'owner':u['id']})
+    skipped=0
+    for item,x,boxes in entries:
+        try: save_image(p['id'],z.read(item),x['label'],str(x.get('group',''))[:200],boxes,bool(x.get('reviewed')) and (project.task=='classification' or x['label']=='OK' or bool(boxes)))
+        except HTTPException: skipped+=1
+    return {**get(p['id']),'imported':len(entries)-skipped,'skipped':skipped}
 @app.get('/api/v1/projects/{pid}/overview')
 def overview(pid:str,u=Depends(auth)):
     p=own(pid,u)
-    result={'project':p,**{kind:rows(kind,pid) for kind in ('image','job','model','deployment','inspection')}}
+    result={'project':p,'image':live_images(pid),**{kind:rows(kind,pid) for kind in ('job','model','deployment','inspection')}}
     for j in result['job']: j.pop('snapshot',None)
     return result
+
+class ClassIn(BaseModel):
+    name:str=Field(min_length=1,max_length=60)
+@app.post('/api/v1/projects/{pid}/classes')
+def class_add(pid:str,b:ClassIn,u=Depends(auth)):
+    p=own(pid,u); labels=p['labels']+[b.name.strip()]
+    if len(labels)>30: raise HTTPException(422,'類別最多 30 個')
+    if not valid_labels(labels): raise HTTPException(422,'類別不可重複或空白')
+    return update(pid,labels=labels)
+@app.patch('/api/v1/projects/{pid}/classes/{name}')
+def class_rename(pid:str,name:str,b:ClassIn,u=Depends(auth)):
+    p=own(pid,u); new_name=b.name.strip()
+    if name not in p['labels']: raise HTTPException(404,'找不到類別')
+    if 'OK' in (name,new_name) and name!=new_name: raise HTTPException(422,'OK 類別不可改名')
+    labels=[new_name if x==name else x for x in p['labels']]
+    if not valid_labels(labels): raise HTTPException(422,'類別不可重複或空白')
+    for x in rows('image',pid):
+        if x['label']==name or any(box['label']==name for box in x['boxes']):
+            update(x['id'],label=new_name if x['label']==name else x['label'],boxes=[{**box,'label':new_name if box['label']==name else box['label']} for box in x['boxes']])
+    return update(pid,labels=labels)
+@app.delete('/api/v1/projects/{pid}/classes/{name}')
+def class_delete(pid:str,name:str,with_images:bool=False,u=Depends(auth)):
+    p=own(pid,u)
+    if name not in p['labels']: raise HTTPException(404,'找不到類別')
+    if name=='OK': raise HTTPException(422,'OK 類別不可刪除')
+    if len(p['labels'])<=2: raise HTTPException(422,'至少保留 2 個類別')
+    images=[x for x in live_images(pid) if x['label']==name or any(box['label']==name for box in x['boxes'])]
+    if images and not with_images: raise HTTPException(409,f'此類別仍有 {len(images)} 張影像')
+    for x in images: update(x['id'],deleted=True)
+    return update(pid,labels=[x for x in p['labels'] if x!=name])
 
 def normalize(raw):
     if len(raw)>20*1024*1024: raise HTTPException(413,'影像上限 20 MB')
@@ -83,17 +164,20 @@ def normalize(raw):
     except (UnidentifiedImageError,OSError,Image.DecompressionBombError): raise HTTPException(400,'無效影像')
 def save_image(pid,raw,label,group='',boxes=None,reviewed=False):
     raw,w,h=normalize(raw); sha=hashlib.sha256(raw).hexdigest()
-    if any(x['sha256']==sha for x in rows('image',pid)): raise HTTPException(409,'此影像已存在')
+    if any(x['sha256']==sha for x in live_images(pid)): raise HTTPException(409,'此影像已存在')
     key=f'images/{pid}/{uuid.uuid4()}.png'; put_blob(key,raw)
     return new('image',{'key':key,'width':w,'height':h,'sha256':sha,'label':label,'group':group,'boxes':boxes or [],'reviewed':reviewed},pid)
 @app.post('/api/v1/projects/{pid}/images')
 async def upload(pid:str,file:UploadFile=File(...),label:str=Form('OK'),group:str=Form(''),u=Depends(auth)):
     p=own(pid,u)
     if label not in p['labels']: raise HTTPException(422,'類別不在專案內')
-    return save_image(pid,await file.read(20*1024*1024+1),label,group,reviewed=p['task']=='classification')
+    return save_image(pid,await file.read(20*1024*1024+1),label,group[:200],reviewed=p['task']=='classification' or label=='OK')
 @app.get('/api/v1/images/{iid}/content')
 def content(iid:str,u=Depends(auth)):
     x=get(iid,'image'); own(x['project_id'],u); return Response(blob(x['key']),media_type='image/png')
+@app.delete('/api/v1/images/{iid}')
+def image_delete(iid:str,u=Depends(auth)):
+    x=get(iid,'image'); own(x['project_id'],u); update(iid,deleted=True); return {'ok':True}
 class Box(BaseModel):
     label:str
     x:float=Field(ge=0,lt=1); y:float=Field(ge=0,lt=1)
@@ -109,13 +193,14 @@ class Annotation(BaseModel):
 @app.put('/api/v1/images/{iid}/annotation')
 def annotate(iid:str,b:Annotation,u=Depends(auth)):
     x=get(iid,'image'); p=own(x['project_id'],u)
+    if x.get('deleted'): raise HTTPException(404,'找不到資料')
     if b.label not in p['labels'] or any(box.label not in p['labels'] or box.label=='OK' for box in b.boxes): raise HTTPException(422,'瑕疵類別無效')
     if p['task']=='detection' and b.label!='OK' and not b.boxes: raise HTTPException(422,'NG 影像至少需要一個瑕疵框')
     if b.label=='OK' and b.boxes: raise HTTPException(422,'OK 影像不可含瑕疵框')
     return update(iid,**b.model_dump())
 
 class TrainIn(BaseModel):
-    adapter:Literal['baseline','cnn','yolo']='baseline'
+    adapter:Literal['baseline','cnn','transfer','yolo']='baseline'
     mode:Literal['fast','balanced','accurate','advanced']='fast'
     epochs:int=Field(default=10,ge=1,le=500)
     batch_size:int=Field(default=16,ge=1,le=128)
@@ -125,13 +210,14 @@ def train(pid:str,b:TrainIn,u=Depends(auth)):
     p=own(pid,u)
     if (p['task']=='detection') != (b.adapter=='yolo'): raise HTTPException(422,'任務與模型不相容')
     if any(j['status'] in ('queued','running') for j in rows('job',pid)): raise HTTPException(409,'此專案已有待執行或執行中的訓練')
-    images=rows('image',pid)
+    images=live_images(pid)
     if not images or any(not x['reviewed'] for x in images): raise HTTPException(422,'請完成所有影像標註確認')
     if set(x['label'] for x in images)!=set(p['labels']): raise HTTPException(422,'每個專案類別都需要訓練影像')
-    try: snapshot=split_snapshot(images)
+    warnings=[]
+    try: snapshot=split_snapshot(images,warnings)
     except ValueError as e: raise HTTPException(422,str(e))
     params={'epochs':{'fast':5,'balanced':20,'accurate':50}.get(b.mode,b.epochs),'batch_size':b.batch_size if b.mode=='advanced' else 16,'learning_rate':b.learning_rate if b.mode=='advanced' else .001}
-    job=new('job',{'name':f'{p["name"]} · {b.adapter} · {time.strftime("%m/%d %H:%M")}','adapter':b.adapter,'parameters':params,'snapshot':snapshot,'snapshot_hash':hashlib.sha256(json.dumps(snapshot,sort_keys=True).encode()).hexdigest(),'status':'queued','progress':0,'logs':[]},pid)
+    job=new('job',{'name':f'{p["name"]} · {b.adapter} · {time.strftime("%m/%d %H:%M")}','adapter':b.adapter,'parameters':params,'snapshot':snapshot,'snapshot_hash':hashlib.sha256(json.dumps(snapshot,sort_keys=True).encode()).hexdigest(),'warnings':warnings,'status':'queued','progress':0,'logs':[]},pid)
     if os.getenv('SYNC_TRAIN','false')=='true':
         try: train_job(job['id'])
         except Exception: pass
@@ -170,7 +256,7 @@ async def inference(project_id:str=Form(...),file:UploadFile=File(...),model_id:
         policy=get(p['active_deployment'],'deployment'); m=get(policy['model_id'],'model'); did=policy['id']
     if m['project_id']!=project_id: raise HTTPException(403,'無權使用此模型')
     raw,_,_=normalize(await file.read(20*1024*1024+1))
-    try: primary=ADAPTERS[m['adapter']]().load(m['path']).predict(raw)
+    try: primary=runtime.predict(m,raw)
     except Exception as e: raise HTTPException(503,f'推論失敗：{type(e).__name__}')
     decision='REVIEW'
     if primary['confidence']>=policy['threshold'] and primary['label']!='UNKNOWN': decision='PASS' if primary['label']=='OK' else 'FAIL'
@@ -182,6 +268,21 @@ async def inference(project_id:str=Form(...),file:UploadFile=File(...),model_id:
             elif secondary['decision']=='OK' and policy['vlm_can_pass']: decision='PASS'
     key=f'inspections/{project_id}/{uuid.uuid4()}.png'; put_blob(key,raw)
     return new('inspection',{'result':decision,'primary':primary,'secondary':secondary,'model_id':m['id'],'deployment_id':did,'latency_ms':round((time.perf_counter()-start)*1000,2),'key':key,'review':None},project_id)
+@app.post('/api/v1/projects/{pid}/preview')
+async def preview(pid:str,file:UploadFile=File(...),model_id:str=Form(''),u=Depends(auth)):
+    # Live preview only: no stored image, no inspection record, no PASS/FAIL decision.
+    p=own(pid,u); start=time.perf_counter()
+    if model_id: m=get(model_id,'model')
+    elif p.get('active_deployment'): m=get(get(p['active_deployment'],'deployment')['model_id'],'model')
+    else:
+        models=rows('model',pid)
+        if not models: raise HTTPException(409,'請先訓練模型')
+        m=models[-1]
+    if m['project_id']!=pid: raise HTTPException(403,'無權使用此模型')
+    raw,_,_=normalize(await file.read(20*1024*1024+1))
+    try: primary=runtime.predict(m,raw)
+    except Exception as e: raise HTTPException(503,f'推論失敗：{type(e).__name__}')
+    return {'primary':primary,'model_id':m['id'],'latency_ms':round((time.perf_counter()-start)*1000,2)}
 class ReviewIn(BaseModel):
     decision:Literal['PASS','FAIL']
     note:str=Field(min_length=1,max_length=1000)
@@ -214,7 +315,7 @@ def suggest(pid:str,iid:str,u=Depends(auth)):
     p=own(pid,u); x=get(iid,'image')
     if x['project_id']!=pid: raise HTTPException(403,'無權存取')
     if not p.get('active_deployment'): raise HTTPException(409,'先部署初始模型才能使用模型輔助標註')
-    m=get(get(p['active_deployment'])['model_id']); r=ADAPTERS[m['adapter']]().load(m['path']).predict(blob(x['key']))
+    m=get(get(p['active_deployment'])['model_id']); r=runtime.predict(m,blob(x['key']))
     return {'suggestion':r,'requires_confirmation':True}
 @app.post('/api/v1/demo')
 def demo(u=Depends(auth)):

@@ -33,6 +33,9 @@ def rows(kind, project_id=None):
         q=select(Record).where(Record.kind==kind)
         if project_id is not None: q=q.where(Record.project_id==project_id)
         return sorted([{'id':r.id,'kind':r.kind,'project_id':r.project_id,**r.data} for r in s.scalars(q).all()],key=lambda r:r['created_at'])
+def live_images(project_id):
+    # Deleted images are hidden but kept: training snapshots still reference their blobs.
+    return [x for x in rows('image',project_id) if not x.get('deleted')]
 def update(rid, **changes):
     with Session(engine) as s:
         r=s.get(Record,rid)

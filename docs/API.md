@@ -10,17 +10,25 @@ Base path：`/api/v1`。完整 schema：`openapi.json`；服務啟動後為 `/ap
 | POST | /login | JSON username/password |
 | POST | /logout | 登出、撤銷 token |
 | GET | /me | 登入身分 |
-| GET/POST | /projects | 清單／建立 |
+| GET/POST | /projects | 清單／建立；選填 adapter 為專案預設模型類型 |
+| PATCH | /projects/{pid} | 專案改名 |
+| GET | /projects/{pid}/archive | 匯出專案檔 zip（類別、樣本、群組、標註；不含模型） |
+| POST | /projects/import | multipart file：匯入專案檔，建立新專案 |
 | GET | /projects/{pid}/overview | 專案、影像、工作、模型、部署、履歷 |
+| POST | /projects/{pid}/classes | 新增類別 name |
+| PATCH | /projects/{pid}/classes/{name} | 類別改名，同步影像與框選標籤；OK 不可改 |
+| DELETE | /projects/{pid}/classes/{name} | 刪除類別；仍有影像時 409，需 `with_images=true` |
 | POST | /projects/{pid}/images | multipart file、label、group |
 | GET | /images/{iid}/content | 讀取影像 |
+| DELETE | /images/{iid} | 軟刪除影像（保留 blob 供既有訓練快照追溯） |
 | PUT | /images/{iid}/annotation | label、boxes、reviewed |
 | POST | /projects/{pid}/images/{iid}/suggest | 已部署模型輔助標註，不自動保存 |
-| POST | /projects/{pid}/train | adapter、mode、epochs、batch_size、learning_rate |
+| POST | /projects/{pid}/train | adapter（transfer/baseline/cnn/yolo）、mode、epochs、batch_size、learning_rate |
 | POST | /projects/{pid}/deploy | model_id、threshold、vlm_enabled、vlm_can_pass |
 | POST | /projects/{pid}/rollback/{did} | 切換到歷史部署 |
 | GET | /models/{mid}/export | format=native/onnx/engine；依 adapter 支援 |
 | POST | /inference | multipart project_id、file；選填 model_id |
+| POST | /projects/{pid}/preview | multipart file；選填 model_id。即時預覽分數，不存影像、不寫履歷、不做 PASS/FAIL |
 | GET | /inspections/{iid}/content | 原始檢測影像 |
 | POST | /inspections/{iid}/review | decision PASS/FAIL、note |
 | POST | /demo | 建立 60 張合成影像 Demo |

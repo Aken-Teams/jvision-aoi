@@ -37,9 +37,9 @@ ssh -L 3000:127.0.0.1:3000 username@SERVER_IP
 
 廠內多使用者正式入口：以公司 HTTPS reverse proxy 指向本機 3000；設定 `.env` 的 `PUBLIC_ORIGIN=https://aoi.company.example` 與 `COOKIE_SECURE=true`。若直接開放 LAN HTTP，需設定 `BIND_ADDRESS=0.0.0.0`、`PUBLIC_ORIGIN=http://SERVER_IP:3000` 並由防火牆限制存取；瀏覽器相機通常不允許此種 HTTP 位址。
 
-### 啟用 GPU / CNN / YOLO
+### 啟用 GPU / 遷移學習 / CNN / YOLO
 
-在 `.env` 設 `INSTALL_AI=true`。YOLO 初始權重須預先放入 `weights/yolo11n.pt`；CNN 從頭訓練，不須外部權重。
+在 `.env` 設 `INSTALL_AI=true`。分類專案預設使用「遷移學習」（MobileNetV3 預訓練特徵＋分類頭，CPU 也可在數十秒內完成），須預先放入 `weights/mobilenet_v3_small.pth`，可在受控建置環境執行 `python scripts/fetch_weights.py` 取得。YOLO 初始權重須預先放入 `weights/yolo11n.pt`；CNN 從頭訓練，不須外部權重。
 
 ```bash
 nvidia-smi
@@ -85,6 +85,7 @@ python -m pytest tests -q
 # optional：pip install redislite
 # TEST_REDIS=1 python -m pytest tests -q -k real_redis_queue
 # TEST_YOLO=1 python -m pytest tests/test_yolo.py -q
+# TEST_TRANSFER=1 python -m pytest tests/test_transfer.py -q
 ```
 
 本地 SQLite／檔案儲存僅為開發模式，Compose 則使用 PostgreSQL／MinIO／Redis。

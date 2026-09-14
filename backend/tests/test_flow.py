@@ -80,6 +80,7 @@ def test_cnn_optional(client):
     login(client);p=client.post('/api/v1/demo').json();pid=p['id']
     r=client.post(f'/api/v1/projects/{pid}/train',json={'adapter':'cnn','mode':'advanced','epochs':2})
     assert r.json()['status']=='completed',r.json()
+    history=get(r.json()['model_id'])['history'];assert [h['epoch'] for h in history]==[1,2] and 0<=history[-1]['val_acc']<=1
     state=client.get(f'/api/v1/projects/{pid}/overview').json()
     x=state['image'][0]
     r=client.post('/api/v1/inference',data={'project_id':pid,'model_id':r.json()['model_id']},files={'file':('test.png',blob(x['key']),'image/png')})
@@ -158,3 +159,82 @@ def test_real_redis_queue(client,monkeypatch,tmp_path):
         assert state['job'][0]['status']=='completed' and len(state['model'])==1
     finally:
         server.terminate();server.wait(timeout=5)
+
+def test_classes_delete_and_preview(client):
+    from app import runtime
+    login(client);p=client.post('/api/v1/demo').json();pid=p['id']
+    assert client.post(f'/api/v1/projects/{pid}/classes',json={'name':'刮傷'}).json()['labels']==['OK','NG','刮傷']
+    assert client.post(f'/api/v1/projects/{pid}/classes',json={'name':'NG'}).status_code==422
+    assert client.patch(f'/api/v1/projects/{pid}/classes/OK',json={'name':'GOOD'}).status_code==422
+    assert client.delete(f'/api/v1/projects/{pid}/classes/OK').status_code==422
+    r=client.patch(f'/api/v1/projects/{pid}/classes/NG',json={'name':'瑕疵'});assert r.json()['labels']==['OK','瑕疵','刮傷']
+    state=client.get(f'/api/v1/projects/{pid}/overview').json()
+    assert sum(x['label']=='瑕疵' for x in state['image'])==30 and not any(x['label']=='NG' for x in state['image'])
+    assert client.delete(f'/api/v1/projects/{pid}/classes/刮傷').json()['labels']==['OK','瑕疵']
+    # Classes with images need explicit confirmation.
+    client.post(f'/api/v1/projects/{pid}/classes',json={'name':'髒污'})
+    x=state['image'][0];raw=blob(x['key'])
+    assert client.delete(f'/api/v1/images/{x["id"]}').status_code==200
+    assert len(client.get(f'/api/v1/projects/{pid}/overview').json()['image'])==59
+    r=client.post(f'/api/v1/projects/{pid}/images',data={'label':'髒污'},files={'file':('again.png',raw,'image/png')});assert r.status_code==200,r.text
+    assert client.delete(f'/api/v1/projects/{pid}/classes/髒污').status_code==409
+    assert client.delete(f'/api/v1/projects/{pid}/classes/髒污?with_images=true').status_code==200
+    state=client.get(f'/api/v1/projects/{pid}/overview').json();assert len(state['image'])==59
+    assert client.post(f'/api/v1/projects/{pid}/preview',files={'file':('p.png',raw,'image/png')}).status_code==409
+    job=client.post(f'/api/v1/projects/{pid}/train',json={'adapter':'baseline'}).json();assert job['status']=='completed',job
+    assert x['sha256'] not in {i['sha256'] for s in job['snapshot'].values() for i in s}
+    before=len(state['inspection'])
+    r=client.post(f'/api/v1/projects/{pid}/preview',files={'file':('p.png',raw,'image/png')});assert r.status_code==200,r.text
+    assert set(r.json()['primary']['scores'])=={'OK','瑕疵'} and r.json()['model_id']==job['model_id']
+    assert runtime.cached(job['model_id'])
+    assert len(client.get(f'/api/v1/projects/{pid}/overview').json()['inspection'])==before
+
+def test_detection_ok_upload_reviewed(client):
+    from PIL import Image
+    login(client);pid=client.post('/api/v1/projects',json={'name':'det','task':'detection'}).json()['id']
+    raw=io.BytesIO();Image.new('RGB',(20,20),(9,9,9)).save(raw,format='PNG')
+    assert client.post(f'/api/v1/projects/{pid}/images',data={'label':'OK'},files={'file':('ok.png',raw.getvalue())}).json()['reviewed']
+
+def test_project_rename_archive_roundtrip(client):
+    import zipfile,json as js
+    login(client);p=client.post('/api/v1/demo').json();pid=p['id']
+    assert client.patch(f'/api/v1/projects/{pid}',json={'name':'外觀檢查'}).json()['name']=='外觀檢查'
+    assert client.post('/api/v1/projects',json={'name':'x','task':'detection','adapter':'transfer'}).status_code==422
+    assert client.post('/api/v1/projects',json={'name':'x','adapter':'transfer'}).json()['adapter']=='transfer'
+    x=client.get(f'/api/v1/projects/{pid}/overview').json()['image'][0]
+    client.delete(f'/api/v1/images/{x["id"]}')
+    r=client.get(f'/api/v1/projects/{pid}/archive');assert r.status_code==200
+    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+        m=js.loads(z.read('project.json'));assert len(m['images'])==59 and len(z.namelist())==60
+    r=client.post('/api/v1/projects/import',files={'file':('p.aoi.zip',r.content,'application/zip')});assert r.status_code==200,r.text
+    imported=r.json();assert imported['name']=='外觀檢查' and imported['imported']==59 and imported['id']!=pid
+    state=client.get(f'/api/v1/projects/{imported["id"]}/overview').json()
+    assert len(state['image'])==59 and all(i['reviewed'] for i in state['image'])
+    assert client.post('/api/v1/projects/import',files={'file':('bad.zip',b'not a zip')}).status_code==422
+    other=io.BytesIO()
+    with zipfile.ZipFile(other,'w') as z: z.writestr('project.json',js.dumps({'format':'jvision-aoi-project','labels':['OK','NG'],'images':[{'file':'../x.png','label':'NG'}]}))
+    assert client.post('/api/v1/projects/import',files={'file':('evil.zip',other.getvalue())}).status_code==422
+
+def test_few_groups_fallback_split():
+    burst=[{'label':'OK','group':'burst-a','sha256':f'ok{i}','id':f'ok{i}'} for i in range(7)]
+    groups=[{'label':'NG','group':f'g{i}','sha256':f'ng{i}','id':f'ng{i}'} for i in range(6)]
+    warnings=[];s=split_snapshot(burst+groups,warnings)
+    assert len(warnings)==1 and '「OK」' in warnings[0]
+    assert all(any(x['label']=='OK' for x in s[k]) for k in ('train','val','test'))
+    ng=[{x['group'] for x in s[k] if x['label']=='NG'} for k in ('train','val','test')]
+    assert not ng[0]&ng[1] and not ng[0]&ng[2]
+    with pytest.raises(ValueError): split_snapshot(burst[:4]+groups)
+
+def test_train_with_single_burst_warns(client):
+    from PIL import Image
+    import numpy as np
+    login(client);pid=client.post('/api/v1/projects',json={'name':'burst'}).json()['id']
+    rng=np.random.default_rng(1)
+    for label,value in (('OK',60),('NG',200)):
+        for i in range(7):
+            b=io.BytesIO();Image.fromarray(np.uint8(np.clip(rng.normal(value,10,(32,32,3)),0,255))).save(b,format='PNG')
+            assert client.post(f'/api/v1/projects/{pid}/images',data={'label':label,'group':f'burst-{label}'},files={'file':('x.png',b.getvalue())}).status_code==200
+    job=client.post(f'/api/v1/projects/{pid}/train',json={'adapter':'baseline'}).json()
+    assert job['status']=='completed',job
+    assert len(job['warnings'])==2
+    assert len(get(job['model_id'])['warnings'])==2

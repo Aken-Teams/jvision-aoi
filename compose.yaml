@@ -16,6 +16,7 @@ x-backend: &backend
     S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
     S3_BUCKET: aoi
     YOLO_WEIGHTS: /weights/yolo11n.pt
+    TRANSFER_WEIGHTS: /weights/mobilenet_v3_small.pth
     TRAIN_DEVICE: ${TRAIN_DEVICE:-cpu}
     SYNC_TRAIN: 'false'
   volumes:
