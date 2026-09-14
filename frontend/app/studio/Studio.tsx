@@ -6,6 +6,7 @@ import type { Camera, Ctx, Pic } from "../lib/api";
 import BoxDrawer from "./BoxDrawer";
 import ClassCard from "./ClassCard";
 import PreviewCard from "./PreviewCard";
+import AudioPreviewCard from "./AudioPreviewCard";
 import TrainingCard from "./TrainingCard";
 
 /** Teachable Machine style canvas: class cards → training → live preview. */
@@ -29,8 +30,9 @@ export default function Studio({
     [newName, setNewName] = useState("");
 
   useEffect(() => {
+    if (p.task === "audio" || p.pose_mode === "sequence") return setCameras([]);
     api<Camera[]>(`/projects/${pid}/cameras`).then(setCameras, () => setCameras([]));
-  }, [pid]);
+  }, [pid, p.task, p.pose_mode]);
 
   const pic = data.image.find((x) => x.id === annotating);
   const nextPending = (current: Pic) => {
@@ -144,15 +146,27 @@ export default function Studio({
         <TrainingCard ctx={ctx} trainingRef={train} />
       </div>
       <div className="stickyColumn">
-        <PreviewCard
-          ctx={ctx}
-          modelId={modelId}
-          setModelId={setModelId}
-          cameras={cameras}
-          onAdvanced={onAdvanced}
-          previewRef={preview}
-          {...webcamFor("preview")}
-        />
+        {p.task === "audio" ? (
+          <AudioPreviewCard
+            ctx={ctx}
+            modelId={modelId}
+            setModelId={setModelId}
+            onAdvanced={onAdvanced}
+            previewRef={preview}
+            micOpen={webcam === "preview"}
+            onMic={(open) => setWebcam(open ? "preview" : "")}
+          />
+        ) : (
+          <PreviewCard
+            ctx={ctx}
+            modelId={modelId}
+            setModelId={setModelId}
+            cameras={cameras}
+            onAdvanced={onAdvanced}
+            previewRef={preview}
+            {...webcamFor("preview")}
+          />
+        )}
       </div>
       {pic && <BoxDrawer ctx={ctx} pic={pic} onClose={() => setAnnotating("")} onNext={nextPending} />}
     </div>

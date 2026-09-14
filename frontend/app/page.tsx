@@ -3,7 +3,6 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Aperture,
   FolderOpen,
-  ScanLine,
   Play,
   Plus,
   Pencil,
@@ -20,6 +19,7 @@ import type { Ctx, Overview, Project } from "./lib/api";
 import Studio from "./studio/Studio";
 import Advanced, { ADVANCED_TABS } from "./advanced/Advanced";
 import NewProject from "./NewProject";
+import ProjectList from "./ProjectList";
 
 export default function Page() {
   const [user, setUser] = useState<string | null>(null),
@@ -284,33 +284,17 @@ export default function Page() {
                   開啟示範專案
                 </button>
               </div>
-              <div className="projectGrid">
-                {projects.map((pr) => (
-                  <button
-                    className="projectCard"
-                    key={pr.id}
-                    onClick={() => {
-                      setPid(pr.id);
-                      setView("studio");
-                    }}
-                  >
-                    <div className="projectIcon">
-                      <ScanLine size={30} />
-                    </div>
-                    <span className="badge">
-                      {pr.task === "classification" ? "影像分類" : "物件偵測"}
-                    </span>
-                    <h2>{pr.name}</h2>
-                    <p>{pr.labels.join(" / ")}</p>
-                    <footer>
-                      {pr.synthetic
-                        ? "合成資料 · 僅供流程驗證"
-                        : "自訂檢測專案"}
-                      <ChevronRight size={18} />
-                    </footer>
-                  </button>
-                ))}
-              </div>
+              <ProjectList
+                projects={projects}
+                busy={busy}
+                run={run}
+                reload={reload}
+                notify={setNotice}
+                onOpen={(id) => {
+                  setPid(id);
+                  setView("studio");
+                }}
+              />
             </>
           ) : !ctx ? (
             <div className="empty">載入專案…</div>

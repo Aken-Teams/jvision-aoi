@@ -1,14 +1,16 @@
-import os, io, time, json, uuid, hashlib
+import os, io, time, json, uuid, hashlib, threading
+import numpy as np
 from contextlib import asynccontextmanager
 from typing import Literal
 from PIL import Image, UnidentifiedImageError
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Response, Request
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, model_validator
 from .core import *
 from .jobs import split_snapshot, train_job
 from .adapters import ADAPTERS
-from . import vlm, runtime
+from . import vlm, runtime, audio, pose
 
 @asynccontextmanager
 async def lifespan(app):
@@ -24,7 +26,10 @@ async def security(request,call_next):
     # Reject cross-origin browser mutations; bearer clients remain supported.
     origin=request.headers.get('origin')
     if request.method not in ('GET','HEAD','OPTIONS') and origin:
-        if origin.rstrip('/') != os.getenv('PUBLIC_ORIGIN','http://localhost:3000').rstrip('/'):
+        allowed={os.getenv('PUBLIC_ORIGIN','http://localhost:3000').rstrip('/')}
+        # The standalone inspection app runs on its own host and may only call the runtime API.
+        if request.url.path.startswith('/api/runtime/') and os.getenv('RUNTIME_ORIGIN'): allowed.add(os.getenv('RUNTIME_ORIGIN').rstrip('/'))
+        if origin.rstrip('/') not in allowed:
             return Response('Origin forbidden',status_code=403)
     r=await call_next(request); r.headers['X-Content-Type-Options']='nosniff'; r.headers['Cache-Control']='no-store'; return r
 
@@ -55,26 +60,70 @@ def me(u=Depends(auth)): return {'username':u['username'],'id':u['id']}
 
 def valid_labels(labels):
     return len(set(labels))==len(labels) and all(x.strip() and len(x)<=60 for x in labels)
+IMAGE_TASKS=('classification','detection')
+TASK_ADAPTERS={'classification':('transfer','baseline','cnn'),'detection':('yolo',),'audio':('audio',),'pose':('pose',)}
+DEFAULT_LABELS={'classification':['OK','NG'],'detection':['OK','NG'],'audio':['正常','異常'],'pose':['正確','錯誤']}
+def pass_labels(p):
+    # Image projects pass on OK; audio projects mark each class as pass or fail.
+    return ['OK'] if p['task'] in IMAGE_TASKS else [x for x in (p.get('pass_labels') or p['labels'][:1]) if x in p['labels']]
 class ProjectIn(BaseModel):
     name:str=Field(min_length=1,max_length=120)
-    task:Literal['classification','detection']='classification'
-    labels:list[str]=Field(default=['OK','NG'],min_length=2,max_length=30)
-    adapter:Literal['transfer','baseline','cnn','yolo']|None=None
+    task:Literal['classification','detection','audio','pose']='classification'
+    labels:list[str]|None=None
+    adapter:Literal['transfer','baseline','cnn','yolo','audio','pose']|None=None
+    pass_labels:list[str]|None=None
+    pose_mode:Literal['static','sequence']|None=None
     @model_validator(mode='after')
     def valid(self):
-        if not valid_labels(self.labels): raise ValueError('類別不可重複或空白')
-        if self.adapter and (self.task=='detection')!=(self.adapter=='yolo'): raise ValueError('任務與模型類型不相容')
-        if 'OK' not in self.labels: raise ValueError('須包含 OK 類別')
+        if self.labels is None: self.labels=list(DEFAULT_LABELS[self.task])
+        if not 2<=len(self.labels)<=30 or not valid_labels(self.labels): raise ValueError('類別需 2–30 個，且不可重複或空白')
+        if self.adapter and self.adapter not in TASK_ADAPTERS[self.task]: raise ValueError('任務與模型類型不相容')
+        if self.task in IMAGE_TASKS:
+            if 'OK' not in self.labels: raise ValueError('須包含 OK 類別')
+            self.pass_labels=None
+        else:
+            if self.pass_labels is None: self.pass_labels=self.labels[:1]
+            if not set(self.pass_labels)<=set(self.labels): raise ValueError('合格類別必須在專案類別內')
+        self.pose_mode=(self.pose_mode or 'static') if self.task=='pose' else None
         return self
 @app.get('/api/v1/projects')
-def projects(u=Depends(auth)): return [p for p in rows('project') if p['owner']==u['id']]
+def projects(u=Depends(auth)): return [p for p in rows('project') if p['owner']==u['id'] and not p.get('deleted')]
+@app.get('/api/v1/projects/trash')
+def projects_trash(u=Depends(auth)):
+    return sorted([p for p in rows('project') if p['owner']==u['id'] and p.get('deleted')],key=lambda p:-p.get('deleted_at',0))
+@app.delete('/api/v1/projects/{pid}')
+def project_delete(pid:str,u=Depends(auth)):
+    own(pid,u)
+    # Soft delete: samples, models, deployments and inspection history stay for audit and restore.
+    return update(pid,deleted=True,deleted_at=time.time())
+@app.post('/api/v1/projects/{pid}/restore')
+def project_restore(pid:str,u=Depends(auth)):
+    own(pid,u,include_deleted=True)
+    return update(pid,deleted=False,deleted_at=None)
 @app.post('/api/v1/projects')
 def create_project(b:ProjectIn,u=Depends(auth)): return new('project',{**b.model_dump(),'owner':u['id']})
+class Roi(BaseModel):
+    # Normalized crop applied by capture clients (webcam / IP camera) before upload and inference.
+    x:float=Field(ge=0,lt=1); y:float=Field(ge=0,lt=1)
+    w:float=Field(ge=.02,le=1); h:float=Field(ge=.02,le=1)
+    @model_validator(mode='after')
+    def fit(self):
+        if self.x+self.w>1.000001 or self.y+self.h>1.000001: raise ValueError('ROI 超出影像')
+        return self
 class ProjectPatch(BaseModel):
-    name:str=Field(min_length=1,max_length=120)
+    name:str|None=Field(default=None,min_length=1,max_length=120)
+    roi:Roi|None=None
+    pass_labels:list[str]|None=None
 @app.patch('/api/v1/projects/{pid}')
-def project_rename(pid:str,b:ProjectPatch,u=Depends(auth)):
-    own(pid,u); return update(pid,name=b.name.strip() or '未命名專案')
+def project_patch(pid:str,b:ProjectPatch,u=Depends(auth)):
+    p=own(pid,u); changes={}
+    if b.name is not None: changes['name']=b.name.strip() or '未命名專案'
+    if 'roi' in b.model_fields_set: changes['roi']=b.roi.model_dump() if b.roi else None
+    if b.pass_labels is not None:
+        if p['task'] in IMAGE_TASKS: raise HTTPException(422,'影像專案固定以 OK 為合格類別')
+        if not set(b.pass_labels)<=set(p['labels']): raise HTTPException(422,'合格類別必須在專案類別內')
+        changes['pass_labels']=[x for x in p['labels'] if x in b.pass_labels]
+    return update(pid,**changes)
 
 ARCHIVE_FORMAT='jvision-aoi-project'
 @app.get('/api/v1/projects/{pid}/archive')
@@ -82,8 +131,9 @@ def project_export(pid:str,u=Depends(auth)):
     # Samples and annotations only; model versions stay bound to this server's audit trail.
     import zipfile,tempfile
     p=own(pid,u); images=live_images(pid)
-    manifest={'format':ARCHIVE_FORMAT,'version':1,'name':p['name'],'task':p['task'],'labels':p['labels'],'adapter':p.get('adapter'),
-              'images':[{'file':f'images/{x["id"]}.png','label':x['label'],'group':x['group'],'boxes':x['boxes'],'reviewed':x['reviewed']} for x in images]}
+    manifest={'format':ARCHIVE_FORMAT,'version':1,'name':p['name'],'task':p['task'],'labels':p['labels'],'adapter':p.get('adapter'),'roi':p.get('roi'),'pass_labels':p.get('pass_labels'),
+              'pose_mode':p.get('pose_mode'),
+              'images':[{'file':f'images/{x["id"]}{Path(x["key"]).suffix}','label':x['label'],'group':x['group'],'boxes':x['boxes'],'reviewed':x['reviewed'],**({'keypoints':x['keypoints']} if 'keypoints' in x else {})} for x in images]}
     tmp=tempfile.NamedTemporaryFile(suffix='.zip',delete=False)
     with zipfile.ZipFile(tmp,'w',zipfile.ZIP_STORED) as z:
         z.writestr('project.json',json.dumps(manifest,ensure_ascii=False,indent=2))
@@ -100,7 +150,8 @@ async def project_import(file:UploadFile=File(...),u=Depends(auth)):
         if info.file_size>20*1024*1024: raise ValueError()
         m=json.loads(z.read(info))
         if m.get('format')!=ARCHIVE_FORMAT or not isinstance(m.get('images'),list) or len(m['images'])>20000: raise ValueError()
-        project=ProjectIn(name=str(m.get('name') or '匯入專案')[:120],task=m.get('task','classification'),labels=m.get('labels'),adapter=m.get('adapter'))
+        project=ProjectIn(name=str(m.get('name') or '匯入專案')[:120],task=m.get('task','classification'),labels=m.get('labels'),adapter=m.get('adapter'),pass_labels=m.get('pass_labels'),pose_mode=m.get('pose_mode'))
+        roi=Roi(**m['roi']).model_dump() if m.get('roi') else None
     except Exception: raise HTTPException(422,'不是有效的 JVision 專案檔')
     entries=[]
     for x in m['images']:
@@ -109,12 +160,17 @@ async def project_import(file:UploadFile=File(...),u=Depends(auth)):
             if item.file_size>20*1024*1024 or x['label'] not in project.labels: raise ValueError()
             boxes=[Box(**b).model_dump() for b in x.get('boxes',[])]
             if any(b['label'] not in project.labels or b['label']=='OK' for b in boxes): raise ValueError()
+            if project.task=='pose':
+                kp=np.asarray(x['keypoints'],np.float32)
+                if kp.shape not in ((17,3),(pose.SEQUENCE_FRAMES,17,3)) or (kp.ndim==3)!=(project.pose_mode=='sequence'): raise ValueError()
             entries.append((item,x,boxes))
         except Exception: raise HTTPException(422,f'專案檔影像資料無效：{str(x.get("file",""))[:80]}')
-    p=new('project',{**project.model_dump(),'owner':u['id']})
+    p=new('project',{**project.model_dump(),'owner':u['id'],'roi':roi})
     skipped=0
     for item,x,boxes in entries:
-        try: save_image(p['id'],z.read(item),x['label'],str(x.get('group',''))[:200],boxes,bool(x.get('reviewed')) and (project.task=='classification' or x['label']=='OK' or bool(boxes)))
+        try:
+            if project.task=='pose': store_pose(p['id'],z.read(item),x['keypoints'],x['label'],str(x.get('group',''))[:200],project.pose_mode)
+            else: save_image(p['id'],z.read(item),x['label'],str(x.get('group',''))[:200],boxes,bool(x.get('reviewed')) and (project.task!='detection' or x['label']=='OK' or bool(boxes)),task=project.task)
         except HTTPException: skipped+=1
     return {**get(p['id']),'imported':len(entries)-skipped,'skipped':skipped}
 @app.get('/api/v1/projects/{pid}/overview')
@@ -136,45 +192,100 @@ def class_add(pid:str,b:ClassIn,u=Depends(auth)):
 def class_rename(pid:str,name:str,b:ClassIn,u=Depends(auth)):
     p=own(pid,u); new_name=b.name.strip()
     if name not in p['labels']: raise HTTPException(404,'找不到類別')
-    if 'OK' in (name,new_name) and name!=new_name: raise HTTPException(422,'OK 類別不可改名')
+    if p['task'] in IMAGE_TASKS and 'OK' in (name,new_name) and name!=new_name: raise HTTPException(422,'OK 類別不可改名')
     labels=[new_name if x==name else x for x in p['labels']]
     if not valid_labels(labels): raise HTTPException(422,'類別不可重複或空白')
     for x in rows('image',pid):
         if x['label']==name or any(box['label']==name for box in x['boxes']):
             update(x['id'],label=new_name if x['label']==name else x['label'],boxes=[{**box,'label':new_name if box['label']==name else box['label']} for box in x['boxes']])
-    return update(pid,labels=labels)
+    extra={'pass_labels':[new_name if x==name else x for x in p['pass_labels']]} if p.get('pass_labels') else {}
+    return update(pid,labels=labels,**extra)
 @app.delete('/api/v1/projects/{pid}/classes/{name}')
 def class_delete(pid:str,name:str,with_images:bool=False,u=Depends(auth)):
     p=own(pid,u)
     if name not in p['labels']: raise HTTPException(404,'找不到類別')
-    if name=='OK': raise HTTPException(422,'OK 類別不可刪除')
+    if p['task'] in IMAGE_TASKS and name=='OK': raise HTTPException(422,'OK 類別不可刪除')
     if len(p['labels'])<=2: raise HTTPException(422,'至少保留 2 個類別')
     images=[x for x in live_images(pid) if x['label']==name or any(box['label']==name for box in x['boxes'])]
     if images and not with_images: raise HTTPException(409,f'此類別仍有 {len(images)} 張影像')
     for x in images: update(x['id'],deleted=True)
-    return update(pid,labels=[x for x in p['labels'] if x!=name])
+    extra={'pass_labels':[x for x in p['pass_labels'] if x!=name]} if p.get('pass_labels') else {}
+    return update(pid,labels=[x for x in p['labels'] if x!=name],**extra)
 
 def normalize(raw):
     if len(raw)>20*1024*1024: raise HTTPException(413,'影像上限 20 MB')
     try:
         im=Image.open(io.BytesIO(raw))
         if im.width*im.height>25_000_000: raise HTTPException(413,'影像像素過大')
-        im=im.convert('RGB'); out=io.BytesIO(); im.save(out,format='PNG')
+        im=im.convert('RGB'); out=io.BytesIO(); im.save(out,format='PNG',compress_level=3)
         return out.getvalue(),im.width,im.height
     except (UnidentifiedImageError,OSError,Image.DecompressionBombError): raise HTTPException(400,'無效影像')
-def save_image(pid,raw,label,group='',boxes=None,reviewed=False):
-    raw,w,h=normalize(raw); sha=hashlib.sha256(raw).hexdigest()
-    if any(x['sha256']==sha for x in live_images(pid)): raise HTTPException(409,'此影像已存在')
-    key=f'images/{pid}/{uuid.uuid4()}.png'; put_blob(key,raw)
-    return new('image',{'key':key,'width':w,'height':h,'sha256':sha,'label':label,'group':group,'boxes':boxes or [],'reviewed':reviewed},pid)
+def normalize_sample(task,raw,window='first'):
+    """Canonical bytes for a project's media: PNG for image tasks, 16 kHz one-second WAV for audio."""
+    if task=='audio':
+        try: return audio.normalize_audio(raw,window),{'media':'audio','duration':1.0},'.wav'
+        except ValueError as e: raise HTTPException(400,str(e))
+    raw,w,h=normalize(raw); return raw,{'media':'image','width':w,'height':h},'.png'
+def media_type(key): return 'audio/wav' if key.endswith('.wav') else 'image/png'
+def thumbnail(record):
+    data=blob(record['key'])
+    if record['key'].endswith('.wav'): data=audio.spectrogram_png(data)
+    elif record.get('media')=='pose' and record.get('keypoints'):
+        im=Image.open(io.BytesIO(data)).convert('RGB'); im.thumbnail((480,480))
+        out=io.BytesIO(); pose.draw_skeleton(im,record['keypoints'],max(2,im.width//120)).save(out,format='PNG'); data=out.getvalue()
+    return Response(data,media_type='image/png')
+_saving=set(); _saving_lock=threading.Lock()
+def _store(pid,raw,sha,ext,fields):
+    # Uploads run concurrently in threads: reserve the hash so two identical samples cannot both pass the check.
+    with _saving_lock:
+        if (pid,sha) in _saving or any(x['sha256']==sha for x in live_images(pid)): raise HTTPException(409,'此樣本已存在')
+        _saving.add((pid,sha))
+    try:
+        key=f'images/{pid}/{uuid.uuid4()}{ext}'; put_blob(key,raw)
+        return new('image',{'key':key,'sha256':sha,'boxes':[],**fields},pid)
+    finally:
+        with _saving_lock: _saving.discard((pid,sha))
+def save_image(pid,raw,label,group='',boxes=None,reviewed=False,task='classification'):
+    raw,meta,ext=normalize_sample(task,raw)
+    return _store(pid,raw,hashlib.sha256(raw).hexdigest(),ext,{**meta,'label':label,'group':group,'boxes':boxes or [],'reviewed':reviewed})
+def store_pose(pid,raw,keypoints,label,group,mode):
+    return _store(pid,raw,hashlib.sha256(raw+json.dumps(keypoints).encode()).hexdigest(),'.png',
+                  {'media':'pose-sequence' if mode=='sequence' else 'pose','keypoints':np.asarray(keypoints,np.float32).round(4).tolist(),'label':label,'group':group,'reviewed':True})
+def pose_keypoints(mode,frames,strict=True):
+    """Normalizes frames and detects keypoints. Returns (thumbnail PNG, keypoints) or raises 422 without a person."""
+    try:
+        if mode=='sequence':
+            if not 2<=len(frames)<=32: raise HTTPException(422,f'動作樣本需要 {pose.SEQUENCE_FRAMES} 張連續影像')
+            picks=np.linspace(0,len(frames)-1,pose.SEQUENCE_FRAMES).round().astype(int)
+            pngs=[normalize(frames[i])[0] for i in picks]; found=[pose.detect(x) for x in pngs]
+            if sum(k is not None for k in found)<len(found)/2: raise HTTPException(422,'未偵測到人體（動作片段中超過一半的影像沒有人）')
+            # Fill frames without a person from the nearest detected frame.
+            idx=[i for i,k in enumerate(found) if k is not None]
+            kps=[found[min(idx,key=lambda j:abs(j-i))] for i in range(len(found))]
+            return pose.montage(pngs,kps),np.stack(kps)
+        png=normalize(frames[0])[0]; kp=pose.detect(png)
+        if kp is None: raise HTTPException(422,'未偵測到人體')
+        return png,kp
+    except ValueError as e: raise HTTPException(503,str(e))
 @app.post('/api/v1/projects/{pid}/images')
-async def upload(pid:str,file:UploadFile=File(...),label:str=Form('OK'),group:str=Form(''),u=Depends(auth)):
+async def upload(pid:str,file:list[UploadFile]=File(...),label:str=Form('OK'),group:str=Form(''),u=Depends(auth)):
     p=own(pid,u)
     if label not in p['labels']: raise HTTPException(422,'類別不在專案內')
-    return save_image(pid,await file.read(20*1024*1024+1),label,group[:200],reviewed=p['task']=='classification' or label=='OK')
+    if p['task']=='pose':
+        frames=[await f.read(20*1024*1024+1) for f in file[:32]]
+        def save():
+            thumb,kp=pose_keypoints(p.get('pose_mode'),frames)
+            return store_pose(pid,thumb,kp.tolist(),label,group[:200],p.get('pose_mode'))
+        return await run_in_threadpool(save)
+    raw=await file[0].read(20*1024*1024+1)
+    # Decode/encode and storage are CPU and IO bound; keep the event loop free for concurrent requests.
+    return await run_in_threadpool(save_image,pid,raw,label,group[:200],reviewed=p['task']!='detection' or label=='OK',task=p['task'])
 @app.get('/api/v1/images/{iid}/content')
 def content(iid:str,u=Depends(auth)):
-    x=get(iid,'image'); own(x['project_id'],u); return Response(blob(x['key']),media_type='image/png')
+    x=get(iid,'image'); own(x['project_id'],u); return Response(blob(x['key']),media_type=media_type(x['key']))
+@app.get('/api/v1/images/{iid}/thumbnail')
+def image_thumbnail(iid:str,u=Depends(auth)):
+    x=get(iid,'image'); own(x['project_id'],u); return thumbnail(x)
 @app.delete('/api/v1/images/{iid}')
 def image_delete(iid:str,u=Depends(auth)):
     x=get(iid,'image'); own(x['project_id'],u); update(iid,deleted=True); return {'ok':True}
@@ -194,13 +305,14 @@ class Annotation(BaseModel):
 def annotate(iid:str,b:Annotation,u=Depends(auth)):
     x=get(iid,'image'); p=own(x['project_id'],u)
     if x.get('deleted'): raise HTTPException(404,'找不到資料')
+    if p['task'] not in IMAGE_TASKS: raise HTTPException(422,'此專案類型不需要標註')
     if b.label not in p['labels'] or any(box.label not in p['labels'] or box.label=='OK' for box in b.boxes): raise HTTPException(422,'瑕疵類別無效')
     if p['task']=='detection' and b.label!='OK' and not b.boxes: raise HTTPException(422,'NG 影像至少需要一個瑕疵框')
     if b.label=='OK' and b.boxes: raise HTTPException(422,'OK 影像不可含瑕疵框')
     return update(iid,**b.model_dump())
 
 class TrainIn(BaseModel):
-    adapter:Literal['baseline','cnn','transfer','yolo']='baseline'
+    adapter:Literal['baseline','cnn','transfer','yolo','audio','pose']='baseline'
     mode:Literal['fast','balanced','accurate','advanced']='fast'
     epochs:int=Field(default=10,ge=1,le=500)
     batch_size:int=Field(default=16,ge=1,le=128)
@@ -208,7 +320,7 @@ class TrainIn(BaseModel):
 @app.post('/api/v1/projects/{pid}/train')
 def train(pid:str,b:TrainIn,u=Depends(auth)):
     p=own(pid,u)
-    if (p['task']=='detection') != (b.adapter=='yolo'): raise HTTPException(422,'任務與模型不相容')
+    if b.adapter not in TASK_ADAPTERS[p['task']]: raise HTTPException(422,'任務與模型不相容')
     if any(j['status'] in ('queued','running') for j in rows('job',pid)): raise HTTPException(409,'此專案已有待執行或執行中的訓練')
     images=live_images(pid)
     if not images or any(not x['reviewed'] for x in images): raise HTTPException(422,'請完成所有影像標註確認')
@@ -247,29 +359,62 @@ def rollback(pid:str,did:str,u=Depends(auth)):
     own(pid,u); d=get(did,'deployment')
     if d['project_id']!=pid: raise HTTPException(422,'部署不屬於專案')
     update(pid,active_deployment=did); return d
+async def score(p,m,files):
+    """Canonical stored bytes, primary result and file extension for one inference request."""
+    if p['task']=='pose':
+        frames=[await f.read(20*1024*1024+1) for f in files[:32]]
+        def run():
+            try: thumb,kp=pose_keypoints(p.get('pose_mode'),frames)
+            except HTTPException as e:
+                if e.status_code!=422: raise
+                png=normalize(frames[-1])[0]
+                return png,{'label':'UNKNOWN','confidence':0.0,'scores':{},'boxes':[],'reason':e.detail},None
+            primary=runtime.predict(m,kp.tolist())
+            return thumb,{**primary,'keypoints':(kp[-1] if kp.ndim==3 else kp).round(4).tolist()},kp
+        raw,primary,kp=await run_in_threadpool(run)
+        return raw,primary,'.png',kp
+    raw,_,ext=await run_in_threadpool(normalize_sample,p['task'],await files[0].read(20*1024*1024+1),'last')
+    primary=await run_in_threadpool(runtime.predict,m,raw)
+    return raw,primary,ext,None
 @app.post('/api/v1/inference')
-async def inference(project_id:str=Form(...),file:UploadFile=File(...),model_id:str=Form(''),u=Depends(auth)):
-    p=own(project_id,u); start=time.perf_counter()
+async def inference(project_id:str=Form(...),file:list[UploadFile]=File(...),model_id:str=Form(''),u=Depends(auth)):
+    return await inspect_files(own(project_id,u),file,model_id)
+async def inspect_files(p,file,model_id='',extra_fields=None):
+    """Scores files with a chosen model (fixed 0.85 policy) or the active deployment, applies the decision contract and stores the inspection."""
+    project_id=p['id']; start=time.perf_counter()
     if model_id: m=get(model_id,'model'); policy={'threshold':.85,'vlm_enabled':False,'vlm_can_pass':False}; did=None
     else:
         if not p.get('active_deployment'): raise HTTPException(409,'請先部署模型')
         policy=get(p['active_deployment'],'deployment'); m=get(policy['model_id'],'model'); did=policy['id']
     if m['project_id']!=project_id: raise HTTPException(403,'無權使用此模型')
-    raw,_,_=normalize(await file.read(20*1024*1024+1))
-    try: primary=runtime.predict(m,raw)
+    try: raw,primary,ext,kp=await score(p,m,file)
+    except HTTPException: raise
     except Exception as e: raise HTTPException(503,f'推論失敗：{type(e).__name__}')
     decision='REVIEW'
-    if primary['confidence']>=policy['threshold'] and primary['label']!='UNKNOWN': decision='PASS' if primary['label']=='OK' else 'FAIL'
+    if primary['confidence']>=policy['threshold'] and primary['label']!='UNKNOWN': decision='PASS' if primary['label'] in pass_labels(p) else 'FAIL'
     secondary=None
-    if decision=='REVIEW' and policy['vlm_enabled']:
+    if decision=='REVIEW' and policy['vlm_enabled'] and p['task'] in IMAGE_TASKS:
         secondary=vlm.inspect(raw,primary)
         if secondary['confidence']>=policy['threshold']:
             if secondary['decision']=='NG': decision='FAIL'
             elif secondary['decision']=='OK' and policy['vlm_can_pass']: decision='PASS'
-    key=f'inspections/{project_id}/{uuid.uuid4()}.png'; put_blob(key,raw)
-    return new('inspection',{'result':decision,'primary':primary,'secondary':secondary,'model_id':m['id'],'deployment_id':did,'latency_ms':round((time.perf_counter()-start)*1000,2),'key':key,'review':None},project_id)
+    key=f'inspections/{project_id}/{uuid.uuid4()}{ext}'; put_blob(key,raw)
+    extra={'media':'pose-sequence' if kp.ndim==3 else 'pose','keypoints':kp.round(4).tolist()} if kp is not None else {}
+    return new('inspection',{'result':decision,'primary':primary,'secondary':secondary,'model_id':m['id'],'deployment_id':did,'latency_ms':round((time.perf_counter()-start)*1000,2),'key':key,'review':None,**extra,**(extra_fields or {})},project_id)
+@app.post('/api/v1/projects/{pid}/pose/detect')
+async def pose_detect(pid:str,file:UploadFile=File(...),u=Depends(auth)):
+    # Keypoints only, no model needed: lets operators see the skeleton while collecting samples.
+    p=own(pid,u)
+    if p['task']!='pose': raise HTTPException(422,'只有姿勢專案可以偵測關節點')
+    raw=await file.read(20*1024*1024+1); start=time.perf_counter()
+    def run():
+        try: kp=pose.detect(normalize(raw)[0])
+        except ValueError as e: raise HTTPException(503,str(e))
+        return None if kp is None else kp.round(4).tolist()
+    keypoints=await run_in_threadpool(run)
+    return {'keypoints':keypoints,'latency_ms':round((time.perf_counter()-start)*1000,2)}
 @app.post('/api/v1/projects/{pid}/preview')
-async def preview(pid:str,file:UploadFile=File(...),model_id:str=Form(''),u=Depends(auth)):
+async def preview(pid:str,file:list[UploadFile]=File(...),model_id:str=Form(''),u=Depends(auth)):
     # Live preview only: no stored image, no inspection record, no PASS/FAIL decision.
     p=own(pid,u); start=time.perf_counter()
     if model_id: m=get(model_id,'model')
@@ -279,8 +424,8 @@ async def preview(pid:str,file:UploadFile=File(...),model_id:str=Form(''),u=Depe
         if not models: raise HTTPException(409,'請先訓練模型')
         m=models[-1]
     if m['project_id']!=pid: raise HTTPException(403,'無權使用此模型')
-    raw,_,_=normalize(await file.read(20*1024*1024+1))
-    try: primary=runtime.predict(m,raw)
+    try: _,primary,_,_=await score(p,m,file)
+    except HTTPException: raise
     except Exception as e: raise HTTPException(503,f'推論失敗：{type(e).__name__}')
     return {'primary':primary,'model_id':m['id'],'latency_ms':round((time.perf_counter()-start)*1000,2)}
 class ReviewIn(BaseModel):
@@ -294,7 +439,10 @@ def review(iid:str,b:ReviewIn,u=Depends(auth)):
     return update(iid,review=event)
 @app.get('/api/v1/inspections/{iid}/content')
 def inspection_content(iid:str,u=Depends(auth)):
-    r=get(iid,'inspection'); own(r['project_id'],u); return Response(blob(r['key']),media_type='image/png')
+    r=get(iid,'inspection'); own(r['project_id'],u); return Response(blob(r['key']),media_type=media_type(r['key']))
+@app.get('/api/v1/inspections/{iid}/thumbnail')
+def inspection_thumbnail(iid:str,u=Depends(auth)):
+    r=get(iid,'inspection'); own(r['project_id'],u); return thumbnail(r)
 @app.get('/api/v1/models/{mid}/export')
 def export(mid:str,format:Literal['native','onnx','engine']='native',u=Depends(auth)):
     m=get(mid,'model'); own(m['project_id'],u)
@@ -318,9 +466,24 @@ def suggest(pid:str,iid:str,u=Depends(auth)):
     m=get(get(p['active_deployment'])['model_id']); r=runtime.predict(m,blob(x['key']))
     return {'suggestion':r,'requires_confirmation':True}
 @app.post('/api/v1/demo')
-def demo(u=Depends(auth)):
-    import numpy as np
+def demo(kind:Literal['image','audio','pose']='image',u=Depends(auth)):
     from PIL import ImageDraw
+    if kind=='pose':
+        # Synthetic stick figures with known keypoints: demonstrates training without a camera, not detection quality.
+        p=new('project',{'name':'Demo · 合成姿勢（舉手／站立）','task':'pose','pose_mode':'static','labels':['站立','舉手'],'pass_labels':['站立'],'adapter':'pose','owner':u['id'],'synthetic':True})
+        rng=np.random.default_rng(42)
+        for label in ('站立','舉手'):
+            for i in range(30):
+                kp=pose.synthetic_pose(rng,label=='舉手'); im=Image.new('RGB',(240,320),(236,240,241))
+                out=io.BytesIO(); pose.draw_skeleton(im,kp,4).save(out,format='PNG')
+                store_pose(p['id'],out.getvalue(),kp.tolist(),label,'','static')
+        return p
+    if kind=='audio':
+        p=new('project',{'name':'Demo · 合成馬達聲（非實測）','task':'audio','labels':['正常','異常'],'pass_labels':['正常'],'adapter':'audio','owner':u['id'],'synthetic':True})
+        rng=np.random.default_rng(42)
+        for label in ('正常','異常'):
+            for i in range(30): save_image(p['id'],audio.synth_motor(rng,label=='異常'),label,reviewed=True,task='audio')
+        return p
     p=new('project',{'name':'Demo · 合成金屬表面（非工業驗證）','task':'classification','labels':['OK','NG'],'owner':u['id'],'synthetic':True})
     rng=np.random.default_rng(42)
     for label in ('OK','NG'):
@@ -387,3 +550,6 @@ def measurements(pid:str,u=Depends(auth)):
 @app.get('/api/v1/measurements/{mid}/content')
 def measurement_image(mid:str,u=Depends(auth)):
     m=get(mid,'measurement');own(m['project_id'],u);return Response(blob(m['key']),media_type='image/png')
+
+# Standalone inspection apps (operator runtime). Imported last: it reuses helpers defined above.
+from . import apps  # noqa: E402,F401

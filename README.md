@@ -39,7 +39,7 @@ ssh -L 3000:127.0.0.1:3000 username@SERVER_IP
 
 ### 啟用 GPU / 遷移學習 / CNN / YOLO
 
-在 `.env` 設 `INSTALL_AI=true`。分類專案預設使用「遷移學習」（MobileNetV3 預訓練特徵＋分類頭，CPU 也可在數十秒內完成），須預先放入 `weights/mobilenet_v3_small.pth`，可在受控建置環境執行 `python scripts/fetch_weights.py` 取得。YOLO 初始權重須預先放入 `weights/yolo11n.pt`；CNN 從頭訓練，不須外部權重。
+在 `.env` 設 `INSTALL_AI=true`。分類專案預設使用「遷移學習」（MobileNetV3 預訓練特徵＋分類頭，CPU 也可在數十秒內完成），須預先放入 `weights/mobilenet_v3_small.pth`，可在受控建置環境執行 `python scripts/fetch_weights.py` 取得。姿勢專案需要 `weights/yolo11n-pose.pt`（同一腳本會下載）；音訊專案從頭訓練，不需要預訓練權重。YOLO 初始權重須預先放入 `weights/yolo11n.pt`；CNN 從頭訓練，不須外部權重。
 
 ```bash
 nvidia-smi
@@ -60,6 +60,20 @@ GPU worker 預設一個程序、一次執行一個工作。API 與 worker 共享
 7. 可重新訓練、切換部署，再回滾舊版。
 
 每類至少 5 個獨立影像／批次群組；資料以約 70/15/15 分割，小樣本因取整略有不同。Demo 是流程驗證資料，不能當作工業精度證明。模型分數低於 0.85 時出現 REVIEW 是正常行為。
+
+### 獨立檢測 App（產線操作畫面）
+
+Studio → 專案 → 進階 →「檢測 App」建立 App，會產生 8 位數存取碼（只顯示一次，可重新產生）。App 只能檢測與人工複判，永遠使用專案「目前部署」的模型、門檻與合格類別；Studio 切換或回滾部署後，檢測站 30 秒內自動套用。支援影像、音訊、姿勢專案；檢測紀錄會標記來源 App，Studio 履歷可查。
+
+`runtime` 服務（預設 port 3010）只提供操作畫面與 `/api/runtime`，不含 Studio 頁面與管理 API。在 `.env` 設定：
+
+```dotenv
+RUNTIME_PORT=3010
+RUNTIME_PUBLIC_URL=https://inspect.example.com   # Studio 顯示的 App 網址
+RUNTIME_ORIGIN=https://inspect.example.com       # 允許呼叫 /api/runtime 的瀏覽器來源
+```
+
+對外網址：在反向代理或 Cloudflare Tunnel（Zero Trust → Networks → Tunnels → Public Hostname）新增主機名稱，服務指向 `http://localhost:3010`。尚未設定前，也可以用 Studio 網址 `/inspect/<網址名稱>` 開啟同一個 App。存取碼連續錯 5 次鎖定 5 分鐘。
 
 ### 本地 VLM
 

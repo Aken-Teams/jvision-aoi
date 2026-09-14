@@ -38,6 +38,6 @@ def test_measurement_api_history(monkeypatch):
         assert r.status_code==200,r.text
         mid=r.json()['id'];assert r.json()['result']['objects'][0]['length']==60
         assert c.get(f'/api/v1/projects/{pid}/measurements').json()[0]['id']==mid
-        assert c.get(f'/api/v1/measurements/{mid}/content').content==fixture_image()
+        assert list(Image.open(io.BytesIO(c.get(f'/api/v1/measurements/{mid}/content').content)).getdata())==list(Image.open(io.BytesIO(fixture_image())).getdata())
         c.post('/api/v1/logout')
         assert c.get(f'/api/v1/measurements/{mid}/content').status_code==401

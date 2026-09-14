@@ -161,6 +161,118 @@ class Transfer(ModelAdapter):
         if format!='onnx': return super().export(path,format)
         out=Path(path)/'transfer.onnx'; torch.onnx.export(self.model,torch.zeros(1,3,self.size,self.size),out,input_names=['images'],output_names=['logits'],opset_version=17,dynamo=False); return out
 
+class AudioCNN(ModelAdapter):
+    """One-second 16 kHz clips -> standardized log-mel -> small CNN trained from scratch (no pretrained weights)."""
+    def net(self,n):
+        import torch.nn as nn
+        block=lambda i,o:[nn.Conv2d(i,o,3,padding=1),nn.BatchNorm2d(o),nn.ReLU()]
+        return nn.Sequential(*block(1,16),nn.MaxPool2d(2),*block(16,32),nn.MaxPool2d(2),*block(32,64),nn.AdaptiveAvgPool2d(1),nn.Flatten(),nn.Dropout(.3),nn.Linear(64,n))
+    def load(self,path):
+        import torch
+        self.labels=json.loads((Path(path)/'labels.json').read_text()); self.model=self.net(len(self.labels))
+        self.model.load_state_dict(torch.load(Path(path)/'audio.pt',map_location='cpu',weights_only=True)); self.model.eval(); return self
+    @staticmethod
+    def augment(x,rng):
+        # Level, timing and background-noise variation; frequency content is left intact because it carries the fault signature.
+        x=np.roll(x*rng.uniform(.6,1.4),int(rng.integers(-1600,1600)))
+        return np.clip(x+rng.normal(0,rng.uniform(0,.02),len(x)).astype(np.float32),-1,1)
+    def train(self,split,path,params,progress):
+        import os, torch
+        from . import audio
+        torch.manual_seed(42); rng=np.random.default_rng(42); self.labels=sorted({x['label'] for x in split['train']})
+        device='cuda' if torch.cuda.is_available() and os.getenv('TRAIN_DEVICE','0')!='cpu' else 'cpu'
+        waves=[audio.samples(x['raw']) for x in split['train']]
+        y=torch.tensor([self.labels.index(x['label']) for x in split['train']],device=device)
+        clean=torch.tensor(np.stack([audio.features(w) for w in waves]),device=device)
+        vx=torch.tensor(np.stack([audio.features(audio.samples(x['raw'])) for x in split['val']]),device=device)
+        vy=torch.tensor([self.labels.index(x['label']) for x in split['val']],device=device)
+        m=self.net(len(self.labels)).to(device); opt=torch.optim.Adam(m.parameters(),lr=params['learning_rate']); lossfn=torch.nn.CrossEntropyLoss()
+        best=float('inf'); best_state=None; epochs=params['epochs']
+        progress(5,f'梅爾頻譜完成 · train {len(waves)} / val {len(vx)}')
+        for epoch in range(epochs):
+            m.train(); total=0; batches=0
+            xb=torch.tensor(np.stack([audio.features(self.augment(w,rng)) for w in waves]),device=device)
+            for idx in torch.randperm(len(xb),device=device).split(params['batch_size']):
+                if len(idx)<2 and len(xb)>1: continue  # BatchNorm needs more than one sample
+                opt.zero_grad(); loss=lossfn(m(xb[idx]),y[idx]); loss.backward(); opt.step(); total+=loss.item(); batches+=1
+            m.eval()
+            with torch.no_grad():
+                out=m(clean); vout=m(vx)
+                point={'epoch':epoch+1,'loss':float(lossfn(out,y)),'val_loss':float(lossfn(vout,vy)),'acc':float((out.argmax(1)==y).float().mean()),'val_acc':float((vout.argmax(1)==vy).float().mean())}
+            if point['val_loss']<best: best=point['val_loss']; best_state={k:v.detach().cpu().clone() for k,v in m.state_dict().items()}
+            progress(5+int((epoch+1)/epochs*85),f'epoch {epoch+1}/{epochs} · loss {total/max(batches,1):.4f} · val {point["val_loss"]:.4f}',point)
+        torch.save(best_state,Path(path)/'audio.pt'); (Path(path)/'labels.json').write_text(json.dumps(self.labels,ensure_ascii=False)); self.load(path)
+        progress(92,'計算獨立測試集指標')
+        return {'device':device,'features':f'log-mel {audio.N_MELS}×101, 16 kHz 1 s','validation':self.evaluate(split['val']),'test':self.evaluate(split['test'])}
+    def predict(self,raw):
+        import torch
+        from . import audio
+        with torch.no_grad(): probs=self.model(torch.tensor(audio.features(audio.samples(raw)))[None]).softmax(1)[0].numpy()
+        i=int(probs.argmax()); return {'label':self.labels[i],'confidence':float(probs[i]),'scores':dict(zip(self.labels,probs.tolist())),'boxes':[]}
+    def export(self,path,format):
+        import torch
+        if format=='native': return Path(path)/'audio.pt'
+        if format!='onnx': return super().export(path,format)
+        # ONNX input is the standardized log-mel (1, 1, 64, 101); feature extraction is documented in manifest.json.
+        out=Path(path)/'audio.onnx'; torch.onnx.export(self.model,torch.zeros(1,1,64,101),out,input_names=['log_mel'],output_names=['logits'],opset_version=17,dynamo=False); return out
+
+class PoseMLP(ModelAdapter):
+    """Pose classes from YOLO11 keypoints: static (17,3) or short sequences (T,17,3) -> normalized features -> MLP."""
+    def net(self,n,dim):
+        import torch.nn as nn
+        return nn.Sequential(nn.Linear(dim,128),nn.ReLU(),nn.Dropout(.2),nn.Linear(128,64),nn.ReLU(),nn.Linear(64,n))
+    def load(self,path):
+        import torch
+        meta=json.loads((Path(path)/'labels.json').read_text()); self.labels=meta['labels']; self.dim=meta['dim']
+        self.model=self.net(len(self.labels),self.dim); self.model.load_state_dict(torch.load(Path(path)/'pose.pt',map_location='cpu',weights_only=True)); self.model.eval(); return self
+    @staticmethod
+    def augment(kp,rng):
+        # Small camera/body variation: rotation, scale, shift, jitter and occasionally missing joints.
+        kp=np.array(kp,np.float32); xy=kp[...,:2]; center=xy.reshape(-1,2).mean(0)
+        a=np.deg2rad(rng.uniform(-10,10)); rot=np.array([[np.cos(a),-np.sin(a)],[np.sin(a),np.cos(a)]],np.float32)
+        xy=(xy-center)@rot.T*rng.uniform(.9,1.1)+center+rng.uniform(-.05,.05,2)+rng.normal(0,.006,xy.shape)
+        kp[...,:2]=xy; kp[...,2]=np.where(rng.random(kp[...,2].shape)<.05,0,kp[...,2]); return kp
+    def train(self,split,path,params,progress):
+        import os, torch
+        from . import pose
+        torch.manual_seed(42); rng=np.random.default_rng(42); self.labels=sorted({x['label'] for x in split['train']})
+        device='cuda' if torch.cuda.is_available() and os.getenv('TRAIN_DEVICE','0')!='cpu' else 'cpu'
+        raw=[x['keypoints'] for x in split['train']]
+        y=torch.tensor([self.labels.index(x['label']) for x in split['train']],device=device)
+        clean=torch.tensor(np.stack([pose.features(k) for k in raw]),device=device); self.dim=clean.shape[1]
+        vx=torch.tensor(np.stack([pose.features(x['keypoints']) for x in split['val']]),device=device)
+        vy=torch.tensor([self.labels.index(x['label']) for x in split['val']],device=device)
+        m=self.net(len(self.labels),self.dim).to(device); opt=torch.optim.Adam(m.parameters(),lr=params['learning_rate']); lossfn=torch.nn.CrossEntropyLoss()
+        best=float('inf'); best_state=None; epochs=params['epochs']
+        for epoch in range(epochs):
+            m.train(); total=0; batches=0
+            xb=torch.tensor(np.stack([pose.features(self.augment(k,rng)) for k in raw]),device=device)
+            for idx in torch.randperm(len(xb),device=device).split(params['batch_size']):
+                opt.zero_grad(); loss=lossfn(m(xb[idx]),y[idx]); loss.backward(); opt.step(); total+=loss.item(); batches+=1
+            m.eval()
+            with torch.no_grad():
+                out=m(clean); vout=m(vx)
+                point={'epoch':epoch+1,'loss':float(lossfn(out,y)),'val_loss':float(lossfn(vout,vy)),'acc':float((out.argmax(1)==y).float().mean()),'val_acc':float((vout.argmax(1)==vy).float().mean())}
+            if point['val_loss']<best: best=point['val_loss']; best_state={k:v.detach().cpu().clone() for k,v in m.state_dict().items()}
+            progress(5+int((epoch+1)/epochs*85),f'epoch {epoch+1}/{epochs} · loss {total/max(batches,1):.4f} · val {point["val_loss"]:.4f}',point)
+        torch.save(best_state,Path(path)/'pose.pt'); (Path(path)/'labels.json').write_text(json.dumps({'labels':self.labels,'dim':self.dim},ensure_ascii=False)); self.load(path)
+        progress(92,'計算獨立測試集指標')
+        return {'device':device,'features':f'YOLO11 keypoints → {self.dim}-d','validation':self.evaluate(split['val']),'test':self.evaluate(split['test'])}
+    def evaluate(self,items):
+        return metrics([x['label'] for x in items],[self.predict(x['keypoints'])['label'] for x in items],self.labels)
+    def predict(self,keypoints):
+        import torch
+        from . import pose
+        feats=pose.features(keypoints)
+        if len(feats)!=self.dim: raise ValueError('姿勢樣本格式與模型不符（靜態／動作）')
+        with torch.no_grad(): probs=self.model(torch.tensor(feats)[None]).softmax(1)[0].numpy()
+        i=int(probs.argmax()); return {'label':self.labels[i],'confidence':float(probs[i]),'scores':dict(zip(self.labels,probs.tolist())),'boxes':[]}
+    def export(self,path,format):
+        import torch
+        if format=='native': return Path(path)/'pose.pt'
+        if format!='onnx': return super().export(path,format)
+        out=Path(path)/'pose.onnx'; torch.onnx.export(self.model,torch.zeros(1,self.dim),out,input_names=['keypoint_features'],output_names=['logits'],opset_version=17,dynamo=False); return out
+
 class YOLOAdapter(ModelAdapter):
     def load(self,path):
         from ultralytics import YOLO
@@ -202,4 +314,4 @@ class YOLOAdapter(ModelAdapter):
         if format not in ('onnx','engine'): return super().export(path,format)
         return Path(self.model.export(format=format))
 
-ADAPTERS={'baseline':Baseline,'cnn':CNN,'transfer':Transfer,'yolo':YOLOAdapter}
+ADAPTERS={'baseline':Baseline,'cnn':CNN,'transfer':Transfer,'audio':AudioCNN,'pose':PoseMLP,'yolo':YOLOAdapter}

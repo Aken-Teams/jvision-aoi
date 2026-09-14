@@ -6,6 +6,7 @@ import type { Project } from "./lib/api";
 
 type Choice = {
   adapter: string;
+  extra?: Record<string, string>;
   title: string;
   use: string;
   specs: string[];
@@ -31,6 +32,43 @@ const TASKS: Record<string, { title: string; description: string; dialog: string
         use: "適用於無 GPU 主機與流程驗證",
         specs: ["24 × 24 像素的彩色影像", "CPU 邏輯迴歸，免下載深度學習權重", "可匯出原生權重", "模型大小：小於 50 KB"],
         note: "精度有限，不建議直接用於產線判定。",
+      },
+    ],
+  },
+  audio: {
+    title: "音訊專案",
+    description: "以 1 秒長度的聲音訓練模型，例如判斷馬達、軸承或設備運轉聲是否異常；可用麥克風錄音或上傳音訊檔。",
+    dialog: "新增音訊專案",
+    choices: [
+      {
+        adapter: "audio",
+        title: "標準音訊模型",
+        use: "適用於設備聲音異常偵測",
+        specs: ["16 kHz、1 秒單聲道片段", "梅爾頻譜 + CNN，從頭訓練免預訓練權重", "可匯出原生權重與 ONNX（輸入梅爾頻譜）", "模型大小：小於 1 MB"],
+        note: "類別預設為「正常／異常」，可改名並設定合格或不合格；建議另建「背景雜音」類別。",
+      },
+    ],
+  },
+  pose: {
+    title: "姿勢專案",
+    description: "辨識人體姿勢或短動作，例如作業姿勢是否正確、是否舉手或彎腰；以網路攝影機拍攝，伺服器自動偵測人體關節點。",
+    dialog: "新增姿勢專案",
+    choices: [
+      {
+        adapter: "pose",
+        extra: { pose_mode: "static" },
+        title: "靜態姿勢模型",
+        use: "判斷單一畫面中的姿勢",
+        specs: ["YOLO11 偵測 17 個人體關節點", "關節點正規化後以 MLP 分類，少量樣本即可訓練", "可按住連拍、定時擷取或上傳照片", "模型大小：小於 100 KB（另需姿勢偵測權重）"],
+        note: "伺服器須預先放置 yolo11n-pose.pt。類別預設「正確／錯誤」，可改名並設定合格或不合格。",
+      },
+      {
+        adapter: "pose",
+        extra: { pose_mode: "sequence" },
+        title: "短動作模型",
+        use: "判斷約 1 秒內的動作",
+        specs: ["每個樣本連續 8 張畫面（約 1.2 秒）", "關節點序列與動作變化量一起分類", "倒數後錄製，可一次連續錄多次", "即時預覽每約 1.5 秒更新一次"],
+        note: "適合揮手、拿取、蹲下等有明顯變化的動作；伺服器須預先放置 yolo11n-pose.pt。",
       },
     ],
   },
@@ -70,11 +108,12 @@ export default function NewProject({
   const [task, setTask] = useState("");
   const dialog = task ? TASKS[task] : null;
 
-  const create = (adapter: string) =>
+  const create = (adapter: string, extra: Record<string, string> = {}) =>
     run(async () => {
       const p = await api<Project>("/projects", {
         method: "POST",
-        body: JSON.stringify({ name: "未命名專案", task, labels: ["OK", "NG"], adapter }),
+        // Audio projects get server defaults: 正常 / 異常 with 正常 as the passing class.
+        body: JSON.stringify({ name: "未命名專案", task, adapter, ...extra, ...(task === "audio" || task === "pose" ? {} : { labels: ["OK", "NG"] }) }),
       });
       setTask("");
       onOpen(p);
@@ -116,7 +155,23 @@ export default function NewProject({
           onClick={() => run(async () => onOpen(await api<Project>("/demo", { method: "POST" })))}
         >
           <Play size={18} />
-          開啟示範專案
+          影像示範專案
+        </button>
+        <button
+          className="raised"
+          disabled={busy}
+          onClick={() => run(async () => onOpen(await api<Project>("/demo?kind=audio", { method: "POST" })))}
+        >
+          <Play size={18} />
+          音訊示範專案
+        </button>
+        <button
+          className="raised"
+          disabled={busy}
+          onClick={() => run(async () => onOpen(await api<Project>("/demo?kind=pose", { method: "POST" })))}
+        >
+          <Play size={18} />
+          姿勢示範專案
         </button>
       </div>
 
@@ -142,6 +197,24 @@ export default function NewProject({
           <h2>{TASKS.detection.title}</h2>
           <p>{TASKS.detection.description}</p>
         </button>
+        <button className="taskCard" onClick={() => setTask("audio")}>
+          <div className="taskThumbs">
+            {["audio-normal-1", "audio-abnormal-1", "audio-normal-2", "audio-abnormal-2"].map((f) => (
+              <img key={f} src={`/samples/${f}.png`} alt="" />
+            ))}
+          </div>
+          <h2>{TASKS.audio.title}</h2>
+          <p>{TASKS.audio.description}</p>
+        </button>
+        <button className="taskCard" onClick={() => setTask("pose")}>
+          <div className="taskThumbs">
+            {["pose-1", "pose-2", "pose-3", "pose-4"].map((f) => (
+              <img key={f} src={`/samples/${f}.png`} alt="" />
+            ))}
+          </div>
+          <h2>{TASKS.pose.title}</h2>
+          <p>{TASKS.pose.description}</p>
+        </button>
       </div>
 
       {dialog && (
@@ -155,7 +228,7 @@ export default function NewProject({
             </div>
             <div className="choiceCards">
               {dialog.choices.map((c) => (
-                <button key={c.adapter} className="choiceCard" disabled={busy} onClick={() => create(c.adapter)}>
+                <button key={c.title} className="choiceCard" disabled={busy} onClick={() => create(c.adapter, c.extra)}>
                   <h3>{c.title}</h3>
                   <b>{c.use}</b>
                   {c.specs.map((s) => (

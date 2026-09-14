@@ -1,4 +1,6 @@
 export type Box = { label: string; x: number; y: number; w: number; h: number };
+/** Normalized crop region applied to camera frames before upload and inference. */
+export type Roi = { x: number; y: number; w: number; h: number };
 export type Project = {
   id: string;
   name: string;
@@ -7,9 +9,14 @@ export type Project = {
   active_deployment?: string;
   synthetic?: boolean;
   adapter?: string;
+  roi?: Roi | null;
+  pass_labels?: string[] | null;
+  pose_mode?: "static" | "sequence" | null;
 };
 export type Pic = {
   id: string;
+  media?: "image" | "audio" | "pose" | "pose-sequence";
+  keypoints?: number[][] | number[][][];
   label: string;
   group: string;
   sha256: string;
@@ -70,6 +77,7 @@ export type Primary = {
   scores?: Record<string, number>;
   boxes?: { xyxy: number[]; label: string; confidence: number }[];
   reason?: string;
+  keypoints?: number[][];
 };
 export type Inspection = {
   id: string;
@@ -78,7 +86,8 @@ export type Inspection = {
   model_id: string;
   primary: Primary;
   secondary?: { reason: string };
-  review?: { decision: string; note: string };
+  review?: { decision: string; note: string; user_name?: string };
+  app_name?: string;
   created_at: number;
 };
 export type Overview = {
@@ -123,9 +132,18 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   return r.json();
 }
 
+/** One pose-sequence sample: consecutive frames uploaded together as repeated "file" parts. */
+export function uploadFrames(pid: string, frames: Blob[], label: string, group = "") {
+  const form = new FormData();
+  frames.forEach((f, i) => form.append("file", f, `frame-${i}.jpg`));
+  form.append("label", label);
+  form.append("group", group);
+  return api<Pic>(`/projects/${pid}/images`, { method: "POST", body: form });
+}
+
 export function uploadImage(pid: string, file: Blob, label: string, group = "") {
   const form = new FormData();
-  form.append("file", file, "sample.png");
+  form.append("file", file, file.type === "image/jpeg" ? "sample.jpg" : file.type === "audio/wav" ? "sample.wav" : "sample.png");
   form.append("label", label);
   form.append("group", group);
   return api<Pic>(`/projects/${pid}/images`, { method: "POST", body: form });
@@ -141,6 +159,8 @@ export const classColor = (labels: string[], label: string) => {
 export const adapterName: Record<string, string> = {
   transfer: "標準影像",
   baseline: "輕量影像",
+  audio: "音訊 CNN",
+  pose: "姿勢 MLP",
   cnn: "CNN",
   yolo: "YOLO",
 };
@@ -185,4 +205,22 @@ export async function captureNetworkCamera(cid: string) {
     throw Error(msg);
   }
   return new File([await r.blob()], "network-camera.png", { type: "image/png" });
+}
+
+/** Crops an image file to the project ROI in the browser; returns the input unchanged without an ROI. */
+export async function cropImage(file: Blob, roi: Roi | null | undefined, type = "image/jpeg", quality = 0.95): Promise<Blob> {
+  if (!roi) return file;
+  const bitmap = await createImageBitmap(file);
+  const sx = Math.round(roi.x * bitmap.width),
+    sy = Math.round(roi.y * bitmap.height),
+    sw = Math.max(1, Math.min(bitmap.width - sx, Math.round(roi.w * bitmap.width))),
+    sh = Math.max(1, Math.min(bitmap.height - sy, Math.round(roi.h * bitmap.height)));
+  const canvas = document.createElement("canvas");
+  canvas.width = sw;
+  canvas.height = sh;
+  canvas.getContext("2d")!.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
+  bitmap.close();
+  return new Promise((resolve, reject) =>
+    canvas.toBlob((b) => (b ? resolve(b) : reject(Error("ROI 裁切失敗"))), type, quality),
+  );
 }

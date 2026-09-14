@@ -64,9 +64,11 @@ def auth(request:Request):
         if body.get('version',0)!=user.get('token_version',0): raise ValueError()
         return user
     except Exception: raise HTTPException(401,'請先登入')
-def own(project_id,user):
+def own(project_id,user,include_deleted=False):
     p=get(project_id,'project')
     if p['owner']!=user['id']: raise HTTPException(403,'無權存取此專案')
+    # Projects in the trash keep their data but are unreachable until restored.
+    if p.get('deleted') and not include_deleted: raise HTTPException(404,'專案已刪除')
     return p
 
 def s3():

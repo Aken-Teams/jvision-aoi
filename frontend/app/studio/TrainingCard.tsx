@@ -10,6 +10,8 @@ const DEFAULTS: Record<string, { epochs: number; batch: number; lr: number }> = 
   baseline: { epochs: 1, batch: 16, lr: 0.001 },
   cnn: { epochs: 20, batch: 16, lr: 0.001 },
   yolo: { epochs: 50, batch: 16, lr: 0.01 },
+  audio: { epochs: 30, batch: 16, lr: 0.001 },
+  pose: { epochs: 50, batch: 16, lr: 0.001 },
 };
 const TRAIN = "#2a78d6",
   VAL = "#eb6834";
@@ -18,7 +20,7 @@ export default function TrainingCard({ ctx, trainingRef }: { ctx: Ctx; trainingR
   const { pid, data, busy, run, reload, notify } = ctx;
   const p = data.project;
   const detection = p.task === "detection";
-  const preferred = p.adapter || (detection ? "yolo" : "transfer");
+  const preferred = p.adapter || (detection ? "yolo" : p.task === "audio" ? "audio" : p.task === "pose" ? "pose" : "transfer");
   const [adapter, setAdapter] = useState(preferred),
     [epochs, setEpochs] = useState(DEFAULTS[preferred].epochs),
     [batch, setBatch] = useState(DEFAULTS[preferred].batch),
@@ -109,7 +111,7 @@ export default function TrainingCard({ ctx, trainingRef }: { ctx: Ctx; trainingR
           模型
           <select
             value={adapter}
-            disabled={detection}
+            disabled={detection || p.task === "audio" || p.task === "pose"}
             onChange={(e) => {
               setAdapter(e.target.value);
               reset(e.target.value);
@@ -117,6 +119,10 @@ export default function TrainingCard({ ctx, trainingRef }: { ctx: Ctx; trainingR
           >
             {detection ? (
               <option value="yolo">YOLO · 瑕疵偵測</option>
+            ) : p.task === "audio" ? (
+              <option value="audio">標準音訊模型 · 梅爾頻譜 CNN</option>
+            ) : p.task === "pose" ? (
+              <option value="pose">{p.pose_mode === "sequence" ? "短動作模型" : "靜態姿勢模型"} · 關節點 MLP</option>
             ) : (
               <>
                 <option value="transfer">標準影像模型 · MobileNetV3 遷移學習</option>

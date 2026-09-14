@@ -30,7 +30,8 @@ export default function AutoCapture({
     [independent, setIndependent] = useState(false),
     [running, setRunning] = useState(false),
     [taken, setTaken] = useState(0),
-    [error, setError] = useState("");
+    [error, setError] = useState(""),
+    [expanded, setExpanded] = useState(false);
   const alive = useRef(false);
   useEffect(
     () => () => {
@@ -68,7 +69,11 @@ export default function AutoCapture({
   };
 
   return (
-    <details className="autoCapture" open={running || undefined}>
+    <details
+      className="autoCapture"
+      open={running || expanded}
+      onToggle={(e) => setExpanded((e.currentTarget as HTMLDetailsElement).open)}
+    >
       <summary>
         <Timer size={15} />
         定時自動擷取

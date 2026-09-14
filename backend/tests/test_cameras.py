@@ -61,7 +61,7 @@ def test_camera_api_credentials_and_ownership(monkeypatch):
         assert c.post(f'/api/v1/cameras/{cid}/capture').status_code==503
         monkeypatch.setenv('CAMERA_GATEWAY_URL','http://camera-gateway:8010');monkeypatch.setenv('CAMERA_GATEWAY_TOKEN','a'*32)
         monkeypatch.setattr(httpx,'post',lambda *a,**kw:httpx.Response(200,content=png()))
-        assert c.post(f'/api/v1/cameras/{cid}/capture').content==png()
+        r=c.post(f'/api/v1/cameras/{cid}/capture');assert list(Image.open(io.BytesIO(r.content)).getdata())==list(Image.open(io.BytesIO(png())).getdata())
         assert c.delete(f'/api/v1/cameras/{cid}').status_code==200
         assert c.post(f'/api/v1/cameras/{cid}/capture').status_code==409
         assert c.get(f'/api/v1/projects/{pid}/cameras').json()==[]

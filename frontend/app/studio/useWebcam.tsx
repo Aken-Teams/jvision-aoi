@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { Roi } from "../lib/api";
 
 /** Browser webcam with device choice and frame grabbing, stopped on unmount. */
 export function useWebcam() {
@@ -55,21 +56,31 @@ export function useWebcam() {
     if (on) start(id);
   };
 
-  /** Current frame scaled so the longest side is at most maxSide (0 keeps native size). */
+  /** Current frame, cropped to roi when given, scaled so the longest side is at most maxSide (0 keeps native size). */
   const grab = useCallback(
-    (maxSide = 0, type = "image/png"): Promise<{ blob: Blob; width: number; height: number } | null> => {
+    (
+      maxSide = 0,
+      type = "image/png",
+      quality = 0.85,
+      roi: Roi | null = null,
+    ): Promise<{ blob: Blob; width: number; height: number } | null> => {
       const v = video.current;
       const track = stream.current?.getVideoTracks()[0];
       // Never save frames from a stopped or detached stream: they come out solid black.
       if (!v || !v.videoWidth || !track || track.readyState !== "live" || v.srcObject !== stream.current)
         return Promise.resolve(null);
-      const scale = maxSide ? Math.min(1, maxSide / Math.max(v.videoWidth, v.videoHeight)) : 1;
+      const r = roi || { x: 0, y: 0, w: 1, h: 1 };
+      const sx = Math.round(r.x * v.videoWidth),
+        sy = Math.round(r.y * v.videoHeight),
+        sw = Math.max(1, Math.min(v.videoWidth - sx, Math.round(r.w * v.videoWidth))),
+        sh = Math.max(1, Math.min(v.videoHeight - sy, Math.round(r.h * v.videoHeight)));
+      const scale = maxSide ? Math.min(1, maxSide / Math.max(sw, sh)) : 1;
       const c = document.createElement("canvas");
-      c.width = Math.round(v.videoWidth * scale);
-      c.height = Math.round(v.videoHeight * scale);
-      c.getContext("2d")!.drawImage(v, 0, 0, c.width, c.height);
+      c.width = Math.max(1, Math.round(sw * scale));
+      c.height = Math.max(1, Math.round(sh * scale));
+      c.getContext("2d")!.drawImage(v, sx, sy, sw, sh, 0, 0, c.width, c.height);
       return new Promise((resolve) =>
-        c.toBlob((b) => resolve(b ? { blob: b, width: c.width, height: c.height } : null), type, 0.85),
+        c.toBlob((b) => resolve(b ? { blob: b, width: c.width, height: c.height } : null), type, quality),
       );
     },
     [],

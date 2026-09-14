@@ -139,10 +139,61 @@
         }
       }
     },
+    "/api/v1/projects/trash": {
+      "get": {
+        "summary": "Projects Trash",
+        "operationId": "projects_trash_api_v1_projects_trash_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{pid}": {
+      "delete": {
+        "summary": "Project Delete",
+        "operationId": "project_delete_api_v1_projects__pid__delete",
+        "parameters": [
+          {
+            "name": "pid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Pid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "patch": {
-        "summary": "Project Rename",
-        "operationId": "project_rename_api_v1_projects__pid__patch",
+        "summary": "Project Patch",
+        "operationId": "project_patch_api_v1_projects__pid__patch",
         "parameters": [
           {
             "name": "pid",
@@ -164,6 +215,43 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{pid}/restore": {
+      "post": {
+        "summary": "Project Restore",
+        "operationId": "project_restore_api_v1_projects__pid__restore_post",
+        "parameters": [
+          {
+            "name": "pid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Pid"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -537,6 +625,43 @@
         }
       }
     },
+    "/api/v1/images/{iid}/thumbnail": {
+      "get": {
+        "summary": "Image Thumbnail",
+        "operationId": "image_thumbnail_api_v1_images__iid__thumbnail_get",
+        "parameters": [
+          {
+            "name": "iid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Iid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/images/{iid}": {
       "delete": {
         "summary": "Image Delete",
@@ -797,6 +922,53 @@
         }
       }
     },
+    "/api/v1/projects/{pid}/pose/detect": {
+      "post": {
+        "summary": "Pose Detect",
+        "operationId": "pose_detect_api_v1_projects__pid__pose_detect_post",
+        "parameters": [
+          {
+            "name": "pid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Pid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_pose_detect_api_v1_projects__pid__pose_detect_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{pid}/preview": {
       "post": {
         "summary": "Preview",
@@ -895,6 +1067,43 @@
       "get": {
         "summary": "Inspection Content",
         "operationId": "inspection_content_api_v1_inspections__iid__content_get",
+        "parameters": [
+          {
+            "name": "iid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Iid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inspections/{iid}/thumbnail": {
+      "get": {
+        "summary": "Inspection Thumbnail",
+        "operationId": "inspection_thumbnail_api_v1_inspections__iid__thumbnail_get",
         "parameters": [
           {
             "name": "iid",
@@ -1030,12 +1239,39 @@
       "post": {
         "summary": "Demo",
         "operationId": "demo_api_v1_demo_post",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "image",
+                "audio",
+                "pose"
+              ],
+              "type": "string",
+              "default": "image",
+              "title": "Kind"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
               }
             }
           }
@@ -1318,6 +1554,626 @@
           }
         }
       }
+    },
+    "/api/v1/projects/{pid}/apps": {
+      "get": {
+        "summary": "Apps List",
+        "operationId": "apps_list_api_v1_projects__pid__apps_get",
+        "parameters": [
+          {
+            "name": "pid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Pid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Apps Create",
+        "operationId": "apps_create_api_v1_projects__pid__apps_post",
+        "parameters": [
+          {
+            "name": "pid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Pid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{aid}": {
+      "patch": {
+        "summary": "Apps Update",
+        "operationId": "apps_update_api_v1_apps__aid__patch",
+        "parameters": [
+          {
+            "name": "aid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Aid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppPatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Apps Disable",
+        "operationId": "apps_disable_api_v1_apps__aid__delete",
+        "parameters": [
+          {
+            "name": "aid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Aid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runtime/{slug}/login": {
+      "post": {
+        "summary": "Runtime Login",
+        "operationId": "runtime_login_api_runtime__slug__login_post",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CodeIn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runtime/{slug}/logout": {
+      "post": {
+        "summary": "Runtime Logout",
+        "operationId": "runtime_logout_api_runtime__slug__logout_post",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runtime/{slug}/config": {
+      "get": {
+        "summary": "Runtime Config",
+        "operationId": "runtime_config_api_runtime__slug__config_get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runtime/{slug}/preview": {
+      "post": {
+        "summary": "Runtime Preview",
+        "operationId": "runtime_preview_api_runtime__slug__preview_post",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_runtime_preview_api_runtime__slug__preview_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runtime/{slug}/inspect": {
+      "post": {
+        "summary": "Runtime Inspect",
+        "operationId": "runtime_inspect_api_runtime__slug__inspect_post",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_runtime_inspect_api_runtime__slug__inspect_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runtime/{slug}/inspections": {
+      "get": {
+        "summary": "Runtime Inspections",
+        "operationId": "runtime_inspections_api_runtime__slug__inspections_get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 30,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runtime/{slug}/inspections/{iid}/thumbnail": {
+      "get": {
+        "summary": "Runtime Thumbnail",
+        "operationId": "runtime_thumbnail_api_runtime__slug__inspections__iid__thumbnail_get",
+        "parameters": [
+          {
+            "name": "iid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Iid"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runtime/{slug}/inspections/{iid}/content": {
+      "get": {
+        "summary": "Runtime Content",
+        "operationId": "runtime_content_api_runtime__slug__inspections__iid__content_get",
+        "parameters": [
+          {
+            "name": "iid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Iid"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runtime/{slug}/inspections/{iid}/review": {
+      "post": {
+        "summary": "Runtime Review",
+        "operationId": "runtime_review_api_runtime__slug__inspections__iid__review_post",
+        "parameters": [
+          {
+            "name": "iid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Iid"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorReview"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runtime/{slug}/cameras/{cid}/capture": {
+      "post": {
+        "summary": "Runtime Camera",
+        "operationId": "runtime_camera_api_runtime__slug__cameras__cid__capture_post",
+        "parameters": [
+          {
+            "name": "cid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Cid"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1349,6 +2205,68 @@
         ],
         "title": "Annotation"
       },
+      "AppIn": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "slug": {
+            "type": "string",
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Slug"
+          },
+          "alert_sound": {
+            "type": "boolean",
+            "title": "Alert Sound",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "slug"
+        ],
+        "title": "AppIn"
+      },
+      "AppPatch": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 80,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "alert_sound": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alert Sound"
+          },
+          "regenerate_code": {
+            "type": "boolean",
+            "title": "Regenerate Code",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "AppPatch"
+      },
       "Body_inference_api_v1_inference_post": {
         "properties": {
           "project_id": {
@@ -1356,8 +2274,11 @@
             "title": "Project Id"
           },
           "file": {
-            "type": "string",
-            "format": "binary",
+            "items": {
+              "type": "string",
+              "format": "binary"
+            },
+            "type": "array",
             "title": "File"
           },
           "model_id": {
@@ -1392,11 +2313,28 @@
         ],
         "title": "Body_measurement_api_v1_projects__pid__measure_post"
       },
-      "Body_preview_api_v1_projects__pid__preview_post": {
+      "Body_pose_detect_api_v1_projects__pid__pose_detect_post": {
         "properties": {
           "file": {
             "type": "string",
             "format": "binary",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_pose_detect_api_v1_projects__pid__pose_detect_post"
+      },
+      "Body_preview_api_v1_projects__pid__preview_post": {
+        "properties": {
+          "file": {
+            "items": {
+              "type": "string",
+              "format": "binary"
+            },
+            "type": "array",
             "title": "File"
           },
           "model_id": {
@@ -1425,11 +2363,57 @@
         ],
         "title": "Body_project_import_api_v1_projects_import_post"
       },
+      "Body_runtime_inspect_api_runtime__slug__inspect_post": {
+        "properties": {
+          "file": {
+            "items": {
+              "type": "string",
+              "format": "binary"
+            },
+            "type": "array",
+            "title": "File"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "single",
+              "continuous"
+            ],
+            "title": "Mode",
+            "default": "single"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_runtime_inspect_api_runtime__slug__inspect_post"
+      },
+      "Body_runtime_preview_api_runtime__slug__preview_post": {
+        "properties": {
+          "file": {
+            "items": {
+              "type": "string",
+              "format": "binary"
+            },
+            "type": "array",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_runtime_preview_api_runtime__slug__preview_post"
+      },
       "Body_upload_api_v1_projects__pid__images_post": {
         "properties": {
           "file": {
-            "type": "string",
-            "format": "binary",
+            "items": {
+              "type": "string",
+              "format": "binary"
+            },
+            "type": "array",
             "title": "File"
           },
           "label": {
@@ -1527,6 +2511,21 @@
         ],
         "title": "ClassIn"
       },
+      "CodeIn": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Code"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "title": "CodeIn"
+      },
       "DeployIn": {
         "properties": {
           "model_id": {
@@ -1590,6 +2589,30 @@
         ],
         "title": "Login"
       },
+      "OperatorReview": {
+        "properties": {
+          "decision": {
+            "type": "string",
+            "enum": [
+              "PASS",
+              "FAIL"
+            ],
+            "title": "Decision"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "decision",
+          "note"
+        ],
+        "title": "OperatorReview"
+      },
       "ProjectIn": {
         "properties": {
           "name": {
@@ -1602,23 +2625,26 @@
             "type": "string",
             "enum": [
               "classification",
-              "detection"
+              "detection",
+              "audio",
+              "pose"
             ],
             "title": "Task",
             "default": "classification"
           },
           "labels": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "maxItems": 30,
-            "minItems": 2,
-            "title": "Labels",
-            "default": [
-              "OK",
-              "NG"
-            ]
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Labels"
           },
           "adapter": {
             "anyOf": [
@@ -1628,7 +2654,9 @@
                   "transfer",
                   "baseline",
                   "cnn",
-                  "yolo"
+                  "yolo",
+                  "audio",
+                  "pose"
                 ]
               },
               {
@@ -1636,6 +2664,35 @@
               }
             ],
             "title": "Adapter"
+          },
+          "pass_labels": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pass Labels"
+          },
+          "pose_mode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "static",
+                  "sequence"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pose Mode"
           }
         },
         "type": "object",
@@ -1647,16 +2704,44 @@
       "ProjectPatch": {
         "properties": {
           "name": {
-            "type": "string",
-            "maxLength": 120,
-            "minLength": 1,
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 120,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Name"
+          },
+          "roi": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Roi"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pass_labels": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pass Labels"
           }
         },
         "type": "object",
-        "required": [
-          "name"
-        ],
         "title": "ProjectPatch"
       },
       "ReviewIn": {
@@ -1683,6 +2768,42 @@
         ],
         "title": "ReviewIn"
       },
+      "Roi": {
+        "properties": {
+          "x": {
+            "type": "number",
+            "exclusiveMaximum": 1.0,
+            "minimum": 0.0,
+            "title": "X"
+          },
+          "y": {
+            "type": "number",
+            "exclusiveMaximum": 1.0,
+            "minimum": 0.0,
+            "title": "Y"
+          },
+          "w": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.02,
+            "title": "W"
+          },
+          "h": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.02,
+            "title": "H"
+          }
+        },
+        "type": "object",
+        "required": [
+          "x",
+          "y",
+          "w",
+          "h"
+        ],
+        "title": "Roi"
+      },
       "TrainIn": {
         "properties": {
           "adapter": {
@@ -1691,7 +2812,9 @@
               "baseline",
               "cnn",
               "transfer",
-              "yolo"
+              "yolo",
+              "audio",
+              "pose"
             ],
             "title": "Adapter",
             "default": "baseline"

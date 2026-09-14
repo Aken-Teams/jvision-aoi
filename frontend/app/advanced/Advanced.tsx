@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Download, History, Layers3, Play, Rocket, Ruler, Upload } from "lucide-react";
+import { Download, History, Layers3, MonitorSmartphone, Play, Rocket, Ruler, Upload } from "lucide-react";
+import AppsPanel from "./AppsPanel";
 import { adapterName, api, modelVersion } from "../lib/api";
 import type { Ctx } from "../lib/api";
 import MeasurementPanel from "../MeasurementPanel";
@@ -9,6 +10,7 @@ import NetworkCamera from "../NetworkCamera";
 export const ADVANCED_TABS = [
   { key: "models", title: "模型版本", icon: Layers3 },
   { key: "deploy", title: "部署管理", icon: Rocket },
+  { key: "apps", title: "檢測 App", icon: MonitorSmartphone },
   { key: "history", title: "檢測履歷", icon: History },
   { key: "measure", title: "量測與相機", icon: Ruler },
 ];
@@ -38,6 +40,7 @@ export default function Advanced({
       </div>
       {tab === "models" && <Models ctx={ctx} onTest={onTest} onDeploy={() => setTab("deploy")} />}
       {tab === "deploy" && <Deploy ctx={ctx} initialModel={modelId} />}
+      {tab === "apps" && <AppsPanel ctx={ctx} />}
       {tab === "history" && <Inspections ctx={ctx} />}
       {tab === "measure" && <Measure ctx={ctx} />}
     </>
@@ -120,11 +123,15 @@ function Deploy({ ctx, initialModel }: { ctx: Ctx; initialModel: string }) {
           第一層判定門檻 · {threshold.toFixed(2)}
           <input type="range" min="0.5" max="1" step="0.01" value={threshold} onChange={(e) => setThreshold(+e.target.value)} />
         </label>
-        <label className="checkbox">
-          <input type="checkbox" checked={useVlm} onChange={(e) => setUseVlm(e.target.checked)} />
-          低信心結果送本地 VLM 複判
-        </label>
-        <div className="callout">VLM 回覆 OK 預設仍需人工確認。無回應、格式錯誤或低信心一律 REVIEW，不會自動放行。</div>
+        {p.task !== "audio" && (
+          <>
+            <label className="checkbox">
+              <input type="checkbox" checked={useVlm} onChange={(e) => setUseVlm(e.target.checked)} />
+              低信心結果送本地 VLM 複判
+            </label>
+            <div className="callout">VLM 回覆 OK 預設仍需人工確認。無回應、格式錯誤或低信心一律 REVIEW，不會自動放行。</div>
+          </>
+        )}
         <button
           className="primary full"
           disabled={busy || !mid}
@@ -206,8 +213,8 @@ function Inspections({ ctx }: { ctx: Ctx }) {
             {[...data.inspection].reverse().map((r) => (
               <tr key={r.id}>
                 <td>
-                  <a href={`/api/v1/inspections/${r.id}/content`} target="_blank" rel="noreferrer">
-                    <img className="historyImage" src={`/api/v1/inspections/${r.id}/content`} alt="檢測影像" />
+                  <a href={`/api/v1/inspections/${r.id}/content`} target="_blank" rel="noreferrer" title={data.project.task === "audio" ? "播放音訊" : "開啟影像"}>
+                    <img className="historyImage" src={`/api/v1/inspections/${r.id}/thumbnail`} alt="檢測樣本" />
                   </a>
                 </td>
                 <td>{new Date(r.created_at * 1000).toLocaleString("zh-TW")}</td>
@@ -218,7 +225,10 @@ function Inspections({ ctx }: { ctx: Ctx }) {
                   {r.primary.label} / {(r.primary.confidence * 100).toFixed(1)}%
                 </td>
                 <td>V{modelVersion(data.model, r.model_id)}</td>
-                <td>{r.latency_ms} ms</td>
+                <td>
+                  {r.latency_ms} ms
+                  {r.app_name && <small className="appSource">{r.app_name}</small>}
+                </td>
                 <td>
                   {r.review ? (
                     <span title={r.review.note}>
@@ -258,7 +268,8 @@ function Inspections({ ctx }: { ctx: Ctx }) {
             }}
           >
             <h2>人工複判</h2>
-            <img className="reviewImage" src={`/api/v1/inspections/${reviewId}/content`} alt="待複判影像" />
+            <img className="reviewImage" src={`/api/v1/inspections/${reviewId}/thumbnail`} alt="待複判樣本" />
+            {data.project.task === "audio" && <audio controls src={`/api/v1/inspections/${reviewId}/content`} className="audioPlayer" />}
             <label>
               確認結果
               <select value={decision} onChange={(e) => setDecision(e.target.value)}>
@@ -286,6 +297,10 @@ function Inspections({ ctx }: { ctx: Ctx }) {
 }
 
 function Measure({ ctx }: { ctx: Ctx }) {
+  if (ctx.data.project.task === "audio") return <div className="panel empty">音訊專案不使用影像量測與網路相機。</div>;
+  return <ImageMeasure ctx={ctx} />;
+}
+function ImageMeasure({ ctx }: { ctx: Ctx }) {
   const { pid, data } = ctx;
   const [file, setFile] = useState<File | null>(null),
     [preview, setPreview] = useState("");

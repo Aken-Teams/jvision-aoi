@@ -1,9 +1,12 @@
 "use client";
 import { useEffect, useState } from "react";
 import { Download, Play, Rocket, Upload, X } from "lucide-react";
-import { adapterName, api, captureNetworkCamera, classColor, modelVersion } from "../lib/api";
+import { adapterName, api, captureNetworkCamera, classColor, cropImage, modelVersion } from "../lib/api";
 import type { Camera, Ctx, Inspection, Primary } from "../lib/api";
 import { useWebcam, WebcamPicker } from "./useWebcam";
+import RoiVideo from "./RoiVideo";
+import Skeleton from "./Skeleton";
+import { captureSequence } from "./SequenceRecorder";
 
 type Preview = { primary: Primary; latency_ms: number; model_id: string };
 const INTERVAL_MS = 200;
@@ -35,6 +38,10 @@ export default function PreviewCard({
   const model = models.find((m) => m.id === chosen) || models[models.length - 1];
   const modelId = model?.id || "";
   const deployment = data.deployment.find((d) => d.id === p.active_deployment);
+  const roi = p.roi || null,
+    roiKey = JSON.stringify(roi);
+  const isPose = p.task === "pose",
+    isSequence = isPose && p.pose_mode === "sequence";
 
   const cam = useWebcam();
   const [source, setSource] = useState<"webcam" | "file" | "network">("webcam"),
@@ -46,9 +53,9 @@ export default function PreviewCard({
     [error, setError] = useState(""),
     [exporting, setExporting] = useState(false);
 
-  const predict = async (file: Blob) => {
+  const predict = async (sample: Blob | Blob[]) => {
     const form = new FormData();
-    form.append("file", file, "preview.jpg");
+    (Array.isArray(sample) ? sample : [sample]).forEach((f, i) => form.append("file", f, `preview-${i}.jpg`));
     if (modelId) form.append("model_id", modelId);
     return api<Preview>(`/projects/${pid}/preview`, { method: "POST", body: form });
   };
@@ -67,12 +74,14 @@ export default function PreviewCard({
       while (alive) {
         const started = performance.now();
         if (document.visibilityState === "visible") {
-          const frame = await grab(detection ? 640 : 320, "image/jpeg");
-          if (frame && alive) {
+          // Pose keypoints need more detail than a 320 px thumbnail; action previews send a fresh 1.2 s clip.
+          const frame = isSequence ? null : await grab(detection || isPose ? 640 : 320, "image/jpeg", 0.85, roi);
+          const frames = isSequence ? await captureSequence(cam, roi, 480).catch(() => null) : null;
+          if ((frame || frames) && alive) {
             try {
-              const r = await predict(frame.blob);
+              const r = await predict(frames || frame!.blob);
               if (!alive) break;
-              setSize({ w: frame.width, h: frame.height });
+              if (frame) setSize({ w: frame.width, h: frame.height });
               setResult(r);
               setError("");
             } catch (e) {
@@ -88,7 +97,7 @@ export default function PreviewCard({
     return () => {
       alive = false;
     };
-  }, [source, webcamOpen, on, modelId, detection, grab]);
+  }, [source, webcamOpen, on, modelId, detection, isPose, isSequence, grab, roiKey]);
 
   // A still image is re-scored whenever it or the chosen model changes.
   useEffect(() => {
@@ -124,11 +133,14 @@ export default function PreviewCard({
   const deployed = !!deployment && deployment.model_id === modelId;
   const inspect = () =>
     run(async () => {
-      const file = source === "webcam" ? (await grab())?.blob : still?.file;
-      if (!file) throw Error("沒有可檢測的影像");
       const form = new FormData();
       form.append("project_id", pid);
-      form.append("file", file, "inspection.png");
+      if (isSequence) (await captureSequence(cam, roi)).forEach((f, i) => form.append("file", f, `inspection-${i}.jpg`));
+      else {
+        const file = source === "webcam" ? (await grab(0, "image/png", 1, roi))?.blob : still?.file;
+        if (!file) throw Error("沒有可檢測的影像");
+        form.append("file", file, "inspection.png");
+      }
       if (!deployed) form.append("model_id", modelId);
       setVerdict(await api<Inspection>("/inference", { method: "POST", body: form }));
       await reload();
@@ -144,12 +156,32 @@ export default function PreviewCard({
             匯出模型
           </button>
         </div>
-        <p className="muted cardNote">必須先在左側訓練模型，才能在這裡預覽。</p>
+        <p className="muted cardNote">
+          必須先在左側訓練模型，才能在這裡預覽。
+          {isPose && " 收集樣本時，類別卡片的網路攝影機畫面會即時顯示骨架。"}
+        </p>
       </section>
     );
 
   const scores = bars(result?.primary, p.labels, detection);
   const showing = source === "webcam" ? webcamOpen : !!still;
+  // Box coordinates are in the scored frame's pixels, which is the ROI crop for webcam frames.
+  const boxes = result?.primary.boxes?.map((b, i) => (
+    <div
+      key={i}
+      className="bbox"
+      style={{
+        left: `${(b.xyxy[0] / size.w) * 100}%`,
+        top: `${(b.xyxy[1] / size.h) * 100}%`,
+        width: `${((b.xyxy[2] - b.xyxy[0]) / size.w) * 100}%`,
+        height: `${((b.xyxy[3] - b.xyxy[1]) / size.h) * 100}%`,
+      }}
+    >
+      <span>
+        {b.label} {(b.confidence * 100).toFixed(0)}%
+      </span>
+    </div>
+  ));
 
   return (
     <section className="previewCard" ref={previewRef}>
@@ -175,8 +207,8 @@ export default function PreviewCard({
         {(
           [
             ["webcam", "網路攝影機"],
-            ["file", "檔案"],
-            ...(cameras.length ? [["network", "IP 相機"]] : []),
+            ...(isSequence ? [] : [["file", "檔案"]]),
+            ...(cameras.length && !isSequence ? [["network", "IP 相機"]] : []),
           ] as [typeof source, string][]
         ).map(([k, t]) => (
           <button key={k} role="tab" aria-selected={source === k} className={source === k ? "on" : ""} onClick={() => switchSource(k)}>
@@ -214,7 +246,12 @@ export default function PreviewCard({
           </select>
           <button
             disabled={!cid || busy}
-            onClick={() => run(async () => pickStill(await captureNetworkCamera(cid)))}
+            onClick={() =>
+              run(async () => {
+                const cropped = await cropImage(await captureNetworkCamera(cid), roi, "image/png");
+                pickStill(new File([cropped], "network-camera.png", { type: cropped.type || "image/png" }));
+              })
+            }
           >
             擷取
           </button>
@@ -222,36 +259,29 @@ export default function PreviewCard({
       )}
       {(cam.error || error) && <div className="error">{cam.error || error}</div>}
 
+      {source === "webcam" && webcamOpen ? (
+        <RoiVideo ctx={ctx} cam={cam}>
+          {boxes}
+          {isPose && <Skeleton keypoints={result?.primary.keypoints} />}
+        </RoiVideo>
+      ) : (
       <div className="stage">
-        {source === "webcam" && webcamOpen && <video ref={cam.video} autoPlay playsInline muted />}
         {source !== "webcam" && still && (
           <img src={still.url} alt="預覽影像" onLoad={(e) => setSize({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })} />
         )}
-        {showing &&
-          result?.primary.boxes?.map((b, i) => (
-            <div
-              key={i}
-              className="bbox"
-              style={{
-                left: `${(b.xyxy[0] / size.w) * 100}%`,
-                top: `${(b.xyxy[1] / size.h) * 100}%`,
-                width: `${((b.xyxy[2] - b.xyxy[0]) / size.w) * 100}%`,
-                height: `${((b.xyxy[3] - b.xyxy[1]) / size.h) * 100}%`,
-              }}
-            >
-              <span>
-                {b.label} {(b.confidence * 100).toFixed(0)}%
-              </span>
-            </div>
-          ))}
+        {showing && boxes}
+        {showing && isPose && <Skeleton keypoints={result?.primary.keypoints} />}
         {!showing && <div className="empty small">{source === "webcam" ? "開啟輸入以即時預覽" : "選擇或擷取一張影像"}</div>}
       </div>
-
+      )}
       <h3 className="outputTitle">輸出</h3>
       <div className="bars">
         {scores.map((s) => (
           <div className="bar" key={s.label}>
-            <span className="barLabel">{s.label}</span>
+            <span className="barLabel">
+              {s.label}
+              {isPose && p.labels.includes(s.label) && <i className={"passDot " + ((p.pass_labels || []).includes(s.label) ? "pass" : "fail")} />}
+            </span>
             <div className="barTrack">
               <div className="barFill" style={{ width: `${Math.max(s.value * 100, 0)}%`, background: s.color }} />
             </div>
@@ -276,7 +306,11 @@ export default function PreviewCard({
         <div className={"verdict compactVerdict " + verdict.result}>
           <strong>{verdict.result}</strong>
           <span>
-            {verdict.result === "REVIEW" ? "需要人工複判" : verdict.result === "PASS" ? "符合目前判定規則" : "檢出疑似瑕疵"} ·{" "}
+            {verdict.result === "REVIEW"
+              ? "需要人工複判"
+              : verdict.result === "PASS"
+                ? isPose ? "判定為合格類別" : "符合目前判定規則"
+                : isPose ? "判定為不合格類別" : "檢出疑似瑕疵"} ·{" "}
             {verdict.primary.label} {(verdict.primary.confidence * 100).toFixed(1)}%
           </span>
           {verdict.secondary && <small>VLM：{verdict.secondary.reason}</small>}
@@ -299,7 +333,7 @@ export default function PreviewCard({
   );
 }
 
-function bars(primary: Primary | undefined, labels: string[], detection: boolean) {
+export function bars(primary: Primary | undefined, labels: string[], detection: boolean) {
   const order = (keys: string[]) => [...labels.filter((l) => keys.includes(l)), ...keys.filter((k) => !labels.includes(k))];
   if (detection) {
     const defects = labels.filter((l) => l !== "OK");
@@ -314,7 +348,7 @@ function bars(primary: Primary | undefined, labels: string[], detection: boolean
   return order(keys).map((l) => ({ label: l, color: classColor(labels, l), value: scores[l] ?? 0 }));
 }
 
-function ExportModal({
+export function ExportModal({
   ctx,
   modelId,
   onClose,
@@ -364,10 +398,12 @@ function ExportModal({
           第一層判定門檻 · {threshold.toFixed(2)}
           <input type="range" min="0.5" max="1" step="0.01" value={threshold} onChange={(e) => setThreshold(+e.target.value)} />
         </label>
-        <label className="checkbox">
-          <input type="checkbox" checked={vlm} onChange={(e) => setVlm(e.target.checked)} />
-          低信心結果送本地 VLM 複判
-        </label>
+        {data.project.task !== "audio" && (
+          <label className="checkbox">
+            <input type="checkbox" checked={vlm} onChange={(e) => setVlm(e.target.checked)} />
+            低信心結果送本地 VLM 複判
+          </label>
+        )}
         <button
           className="primary full"
           disabled={busy}
@@ -396,6 +432,15 @@ function ExportModal({
           }}
         >
           查看部署歷程與回滾
+        </button>
+        <button
+          className="linkButton"
+          onClick={() => {
+            onClose();
+            onAdvanced("apps");
+          }}
+        >
+          部署為獨立檢測 App（獨立網址與操作畫面）
         </button>
       </div>
     </div>

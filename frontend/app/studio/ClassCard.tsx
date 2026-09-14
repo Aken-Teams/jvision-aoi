@@ -1,12 +1,20 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { Camera, Check, Lock, MoreVertical, Pencil, Upload, Video, X } from "lucide-react";
-import { api, captureNetworkCamera, classColor, groupCount, MIN_GROUPS, newGroup, uploadImage } from "../lib/api";
+import { Camera, Check, Lock, Mic, MoreVertical, Pencil, Play, Upload, Video, X } from "lucide-react";
+import { api, captureNetworkCamera, classColor, cropImage, groupCount, MIN_GROUPS, newGroup, uploadFrames, uploadImage } from "../lib/api";
 import type { Camera as NetCamera, Ctx, Pic } from "../lib/api";
 import { useWebcam, WebcamPicker } from "./useWebcam";
 import AutoCapture from "./AutoCapture";
+import RoiVideo from "./RoiVideo";
+import AudioPane from "./AudioPane";
+import SequenceRecorder from "./SequenceRecorder";
+import Skeleton from "./Skeleton";
+import { useLivePose } from "./useLivePose";
+import { encodeWav, fileToClips } from "../lib/audio";
 
 const BURST_MS = 200;
+const UPLOAD_CONCURRENCY = 4;
+const JPEG_QUALITY = 0.95;
 
 export default function ClassCard({
   ctx,
@@ -30,7 +38,16 @@ export default function ClassCard({
   const images = data.image.filter((x) => x.label === label);
   const groups = groupCount(images);
   const color = classColor(p.labels, label);
-  const locked = label === "OK";
+  const isAudio = p.task === "audio",
+    isPose = p.task === "pose",
+    isSequence = isPose && p.pose_mode === "sequence";
+  const customPass = isAudio || isPose;
+  const locked = label === "OK" && !customPass;
+  const passing = customPass ? (p.pass_labels || []).includes(label) : label === "OK";
+  const unit = isAudio ? "音訊樣本" : isSequence ? "動作樣本" : isPose ? "姿勢樣本" : "圖片樣本";
+  const roi = p.roi || null;
+  // IP camera snapshots are cropped in the browser with the same ROI as webcam frames.
+  const captureCamera = async () => cropImage(await captureNetworkCamera(cid), roi, "image/jpeg", JPEG_QUALITY);
 
   const [editing, setEditing] = useState(false),
     [draft, setDraft] = useState(label),
@@ -41,31 +58,55 @@ export default function ClassCard({
     [pending, setPending] = useState(0),
     [error, setError] = useState("");
   const cam = useWebcam();
+  const live = useLivePose(pid, cam, p.roi || null, isPose && webcamOpen);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null),
-    queue = useRef<Promise<void>>(Promise.resolve()),
-    stats = useRef({ saved: 0, skipped: 0 });
+    slots = useRef({ active: 0, waiting: [] as (() => void)[] }),
+    inflight = useRef(new Set<Promise<void>>()),
+    stats = useRef({ saved: 0, skipped: 0, noPerson: 0 });
 
-  // Uploads run one at a time so a long burst never floods the API.
-  const enqueue = (blob: Blob, group: string) => {
+  // Up to UPLOAD_CONCURRENCY uploads run at once; the rest wait for a free slot.
+  const acquire = () => {
+    const s = slots.current;
+    if (s.active < UPLOAD_CONCURRENCY) {
+      s.active++;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => s.waiting.push(resolve));
+  };
+  const release = () => {
+    const next = slots.current.waiting.shift();
+    if (next) next(); // hand the slot straight to the next waiting upload
+    else slots.current.active--;
+  };
+  /** Queues an upload; the returned promise resolves once it has a slot, so capture loops get backpressure. */
+  const enqueue = (sample: Blob | Blob[], group: string) => {
     setPending((n) => n + 1);
-    queue.current = queue.current
-      .then(() => uploadImage(pid, blob, label, group))
+    const started = acquire();
+    const done: Promise<void> = started
+      .then(() => (Array.isArray(sample) ? uploadFrames(pid, sample, label, group) : uploadImage(pid, sample, label, group)))
       .then(
         () => void stats.current.saved++,
         (e: Error & { status?: number }) => {
           if (e.status === 409) stats.current.skipped++;
+          else if (e.status === 422 && isPose) stats.current.noPerson++;
           else setError(e.message);
         },
       )
-      .finally(() => setPending((n) => n - 1));
-    return queue.current;
+      .finally(() => {
+        release();
+        setPending((n) => n - 1);
+        inflight.current.delete(done);
+      });
+    inflight.current.add(done);
+    return started;
   };
   const finish = async () => {
-    await queue.current;
-    const { saved, skipped } = stats.current;
-    stats.current = { saved: 0, skipped: 0 };
+    while (inflight.current.size) await Promise.all([...inflight.current]);
+    const { saved, skipped, noPerson } = stats.current;
+    stats.current = { saved: 0, skipped: 0, noPerson: 0 };
     await reload();
-    if (saved || skipped) notify(`「${label}」新增 ${saved} 張${skipped ? `，略過 ${skipped} 張重複影像` : ""}`);
+    if (saved || skipped || noPerson)
+      notify(`「${label}」新增 ${saved} 個樣本${skipped ? `，略過 ${skipped} 個重複` : ""}${noPerson ? `，${noPerson} 個未偵測到人體` : ""}`);
   };
 
   const startBurst = () => {
@@ -73,7 +114,7 @@ export default function ClassCard({
     const group = newGroup();
     setRecording(true);
     const shoot = () =>
-      cam.grab(1280).then((frame) => {
+      cam.grab(1280, "image/jpeg", JPEG_QUALITY, roi).then((frame) => {
         if (frame) enqueue(frame.blob, group);
       });
     shoot();
@@ -88,12 +129,34 @@ export default function ClassCard({
     setTimeout(finish, BURST_MS);
   };
 
-  const uploadFiles = (files: FileList | File[]) => {
+  const uploadFiles = async (files: FileList | File[]) => {
     setError("");
-    // Each file is its own independent unit for the train/val/test split.
-    Array.from(files).forEach((f) => enqueue(f, ""));
+    if (isAudio) {
+      // An audio file is cut into one-second clips; clips from one file share a group.
+      for (const f of Array.from(files)) {
+        try {
+          const clips = await fileToClips(f, 600);
+          const group = clips.length > 1 ? newGroup() : "";
+          for (const clip of clips) await enqueue(encodeWav(clip), group);
+        } catch (e) {
+          setError((e as Error).message);
+        }
+      }
+    } else {
+      // Each image file is its own independent unit for the train/val/test split.
+      Array.from(files).forEach((f) => enqueue(f, ""));
+    }
     finish();
   };
+  const togglePass = () =>
+    run(async () => {
+      const current = p.pass_labels || [];
+      await api(`/projects/${pid}`, {
+        method: "PATCH",
+        body: JSON.stringify({ pass_labels: passing ? current.filter((x) => x !== label) : [...current, label] }),
+      });
+      await reload();
+    });
 
   const rename = () =>
     run(async () => {
@@ -156,6 +219,15 @@ export default function ClassCard({
             {locked ? <Lock size={14} /> : <Pencil size={14} />}
           </button>
         )}
+        {customPass && !editing && (
+          <button
+            className={"passChip " + (passing ? "pass" : "fail")}
+            title="檢測時判定此類別為合格或不合格，點擊切換"
+            onClick={togglePass}
+          >
+            {passing ? "合格" : "不合格"}
+          </button>
+        )}
         <div className="menuWrap">
           <button className="iconButton" aria-label={`${label} 選項`} onClick={() => setMenu(!menu)}>
             <MoreVertical size={18} />
@@ -199,7 +271,7 @@ export default function ClassCard({
       <p className="classCount">
         {images.length ? (
           <>
-            {images.length} 個圖片樣本 ·{" "}
+            {images.length} 個{unit} ·{" "}
             <span className={groups < MIN_GROUPS ? "groupShort" : "groupDone"} title="同一次錄製算一組；每類建議至少 5 組">
               {groups < MIN_GROUPS ? `${groups} / ${MIN_GROUPS} 組` : `${groups} 組`}
             </span>
@@ -207,12 +279,23 @@ export default function ClassCard({
         ) : pending ? (
           ""
         ) : (
-          "新增圖片樣本："
+          `新增${unit}：`
         )}
         {pending > 0 && `${images.length ? " · " : ""}上傳中 ${pending}`}
       </p>
 
-      {webcamOpen ? (
+      {isAudio && webcamOpen ? (
+        <AudioPane
+          open={webcamOpen}
+          groups={groups}
+          onClose={() => onWebcam(false)}
+          onTake={(clips) => {
+            const group = newGroup();
+            clips.forEach((clip) => enqueue(encodeWav(clip), group));
+            finish();
+          }}
+        />
+      ) : webcamOpen ? (
         <div className="capturePane">
           <div className="paneHead">
             <b>網路攝影機</b>
@@ -221,8 +304,25 @@ export default function ClassCard({
             </button>
           </div>
           {cam.error && <div className="error">{cam.error}</div>}
-          <video ref={cam.video} autoPlay playsInline muted className={recording ? "recording" : ""} />
+          <RoiVideo ctx={ctx} cam={cam} recording={recording}>
+            {isPose && <Skeleton keypoints={live.keypoints || undefined} />}
+          </RoiVideo>
+          {isPose && cam.on && (
+            <small className={"poseStatus " + live.status}>
+              {live.status === "found"
+                ? "● 偵測到人體"
+                : live.status === "none"
+                  ? "○ 未偵測到人體：請讓全身或上半身進入畫面"
+                  : live.status === "error"
+                    ? `姿勢偵測失敗：${live.message || "請稍後再試"}`
+                    : "姿勢偵測啟動中…"}
+            </small>
+          )}
           <WebcamPicker cam={cam} />
+          {isSequence ? (
+            <SequenceRecorder cam={cam} roi={roi} onSample={(frames, group) => enqueue(frames, group)} onDone={finish} />
+          ) : (
+          <>
           <button
             className="primary full holdButton"
             disabled={!cam.on}
@@ -251,18 +351,20 @@ export default function ClassCard({
           </small>
           <AutoCapture
             key="webcam"
-            grab={async () => (await cam.grab(1280))?.blob ?? null}
+            grab={async () => (await cam.grab(1280, "image/jpeg", JPEG_QUALITY, roi))?.blob ?? null}
             save={(blob, group) => enqueue(blob, group)}
             minInterval={0.2}
             defaultInterval={1}
             disabled={!cam.on || recording}
             onDone={finish}
           />
+          </>
+          )}
         </div>
       ) : source === "upload" ? (
         <div className="capturePane">
           <div className="paneHead">
-            <b>上傳影像</b>
+            <b>{isAudio ? "上傳音訊" : "上傳影像"}</b>
             <button className="iconButton" aria-label="關閉上傳" onClick={() => setSource("")}>
               <X size={16} />
             </button>
@@ -276,12 +378,12 @@ export default function ClassCard({
             }}
           >
             <Upload size={24} />
-            <b>拖曳影像至此，或點擊選取</b>
-            <span>PNG / JPG · 單張上限 20 MB · 可多選</span>
+            <b>{isAudio ? "拖曳音訊檔至此，或點擊選取" : "拖曳影像至此，或點擊選取"}</b>
+            <span>{isAudio ? "WAV / MP3 / M4A 等 · 自動切成 1 秒樣本 · 可多選" : "PNG / JPG · 單張上限 20 MB · 可多選"}</span>
             <input
-              aria-label={`上傳 ${label} 影像`}
+              aria-label={`上傳 ${label} ${isAudio ? "音訊" : "影像"}`}
               type="file"
-              accept="image/*"
+              accept={isAudio ? "audio/*,.wav" : "image/*"}
               multiple
               onChange={(e) => {
                 if (e.target.files) uploadFiles(e.target.files);
@@ -313,7 +415,7 @@ export default function ClassCard({
                 disabled={!cid || pending > 0}
                 onClick={() => {
                   setError("");
-                  captureNetworkCamera(cid).then(
+                  captureCamera().then(
                     (f) => {
                       enqueue(f, "");
                       finish();
@@ -326,7 +428,7 @@ export default function ClassCard({
               </button>
               <AutoCapture
                 key={`network-${cid}`}
-                grab={() => captureNetworkCamera(cid)}
+                grab={captureCamera}
                 save={(blob, group) => enqueue(blob, group)}
                 minInterval={1}
                 defaultInterval={3}
@@ -345,18 +447,34 @@ export default function ClassCard({
         </div>
       ) : (
         <div className="sourceButtons">
-          <button onClick={toggleWebcam}>
-            <Video size={22} />
-            網路攝影機
-          </button>
-          <button onClick={() => setSource("upload")}>
-            <Upload size={22} />
-            上傳
-          </button>
-          <button onClick={() => setSource("network")}>
-            <Camera size={22} />
-            IP 相機
-          </button>
+          {isAudio ? (
+            <button
+              onClick={() => {
+                setSource("");
+                onWebcam(true);
+              }}
+            >
+              <Mic size={22} />
+              麥克風
+            </button>
+          ) : (
+            <button onClick={toggleWebcam}>
+              <Video size={22} />
+              網路攝影機
+            </button>
+          )}
+          {!isSequence && (
+            <button onClick={() => setSource("upload")}>
+              <Upload size={22} />
+              上傳
+            </button>
+          )}
+          {!isAudio && !isSequence && (
+            <button onClick={() => setSource("network")}>
+              <Camera size={22} />
+              IP 相機
+            </button>
+          )}
         </div>
       )}
       {error && (
@@ -373,11 +491,15 @@ export default function ClassCard({
           {[...images].reverse().map((im) => (
             <div className="sample" key={im.id}>
               <button
-                className="sampleImage"
-                title={p.task === "detection" ? "開啟框選" : im.group ? `批次 ${im.group}` : "獨立樣本"}
-                onClick={() => p.task === "detection" && onAnnotate(im)}
+                className={"sampleImage" + (isAudio ? " audioSample" : isSequence ? " sequenceSample" : "")}
+                title={p.task === "detection" ? "開啟框選" : isAudio ? "點擊播放" : im.group ? `批次 ${im.group}` : "獨立樣本"}
+                onClick={() => {
+                  if (p.task === "detection") onAnnotate(im);
+                  if (isAudio) new Audio(`/api/v1/images/${im.id}/content`).play().catch(() => {});
+                }}
               >
-                <img src={`/api/v1/images/${im.id}/content`} alt={`${label} 樣本`} loading="lazy" />
+                <img src={`/api/v1/images/${im.id}/thumbnail`} alt={`${label} 樣本`} loading="lazy" />
+                {isAudio && <Play size={14} className="playIcon" />}
                 {!im.reviewed && <span className="pendingTag">待框選</span>}
                 {p.task === "detection" && im.reviewed && im.boxes.length > 0 && (
                   <span className="boxTag">

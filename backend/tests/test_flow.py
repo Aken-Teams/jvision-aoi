@@ -238,3 +238,155 @@ def test_train_with_single_burst_warns(client):
     assert job['status']=='completed',job
     assert len(job['warnings'])==2
     assert len(get(job['model_id'])['warnings'])==2
+
+def test_concurrent_uploads_dedupe(client):
+    from PIL import Image
+    from concurrent.futures import ThreadPoolExecutor
+    import numpy as np
+    login(client);pid=client.post('/api/v1/projects',json={'name':'concurrent'}).json()['id']
+    rng=np.random.default_rng(7)
+    frames=[]
+    for i in range(6):
+        b=io.BytesIO();Image.fromarray(np.uint8(rng.integers(0,255,(64,64,3)))).save(b,format='JPEG',quality=95);frames.append(b.getvalue())
+    post=lambda raw:client.post(f'/api/v1/projects/{pid}/images',data={'label':'NG','group':'burst-x'},files={'file':('f.jpg',raw,'image/jpeg')}).status_code
+    with ThreadPoolExecutor(8) as pool: codes=list(pool.map(post,frames+[frames[0]]*4))
+    assert codes[:6]==[200]*6 or sorted(codes).count(200)==6, codes
+    assert sorted(codes).count(200)==6 and sorted(codes).count(409)==4, codes
+    assert len(client.get(f'/api/v1/projects/{pid}/overview').json()['image'])==6
+
+def test_project_roi(client):
+    login(client);pid=client.post('/api/v1/projects',json={'name':'roi'}).json()['id']
+    r=client.patch(f'/api/v1/projects/{pid}',json={'roi':{'x':.1,'y':.2,'w':.5,'h':.6}});assert r.json()['roi']=={'x':.1,'y':.2,'w':.5,'h':.6}
+    assert client.patch(f'/api/v1/projects/{pid}',json={'name':'改名'}).json()['roi']['w']==.5
+    assert client.patch(f'/api/v1/projects/{pid}',json={'roi':{'x':.8,'y':0,'w':.5,'h':.5}}).status_code==422
+    assert client.patch(f'/api/v1/projects/{pid}',json={'roi':{'x':0,'y':0,'w':.01,'h':.5}}).status_code==422
+    archive=client.get(f'/api/v1/projects/{pid}/archive').content
+    assert client.post('/api/v1/projects/import',files={'file':('p.zip',archive)}).json()['roi']['h']==.6
+    assert client.patch(f'/api/v1/projects/{pid}',json={'roi':None}).json()['roi'] is None
+
+def test_audio_project_flow(client):
+    pytest.importorskip('torch')
+    import zipfile,json as js
+    import numpy as np
+    from app import audio
+    login(client)
+    p=client.post('/api/v1/demo?kind=audio').json();pid=p['id']
+    assert p['task']=='audio' and p['pass_labels']==['正常']
+    state=client.get(f'/api/v1/projects/{pid}/overview').json()
+    assert len(state['image'])==60 and all(x['media']=='audio' and x['reviewed'] for x in state['image'])
+    x=state['image'][0]
+    assert client.get(f'/api/v1/images/{x["id"]}/content').headers['content-type']=='audio/wav'
+    thumb=client.get(f'/api/v1/images/{x["id"]}/thumbnail');assert thumb.headers['content-type']=='image/png'
+    assert client.post(f'/api/v1/projects/{pid}/train',json={'adapter':'transfer'}).status_code==422
+    job=client.post(f'/api/v1/projects/{pid}/train',json={'adapter':'audio','mode':'advanced','epochs':6,'learning_rate':.003}).json()
+    assert job['status']=='completed',job
+    model=get(job['model_id']);assert model['metrics']['test']['accuracy']>=.8 and len(model['history'])==6
+    client.post(f'/api/v1/projects/{pid}/deploy',json={'model_id':job['model_id'],'threshold':.5})
+    rng=np.random.default_rng(99)
+    for abnormal,expected in ((False,'PASS'),(True,'FAIL')):
+        # A 3-second 44.1 kHz stereo recording: the server resamples, mixes down and scores the last second.
+        clip=audio.samples(audio.synth_motor(rng,abnormal));long=np.tile(clip,3);up=np.interp(np.linspace(0,len(long)-1,int(len(long)*44100/16000)),np.arange(len(long)),long)
+        pcm=(np.stack([up,up],1)*32767).astype('<i2').tobytes()
+        import struct
+        wav=b'RIFF'+struct.pack('<I',36+len(pcm))+b'WAVEfmt '+struct.pack('<IHHIIHH',16,1,2,44100,44100*4,4,16)+b'data'+struct.pack('<I',len(pcm))+pcm
+        r=client.post('/api/v1/inference',data={'project_id':pid},files={'file':('m.wav',wav,'audio/wav')});assert r.status_code==200,r.text
+        assert r.json()['result']==expected,r.json()
+        assert client.get(f'/api/v1/inspections/{r.json()["id"]}/thumbnail').status_code==200
+    assert client.post(f'/api/v1/projects/{pid}/preview',files={'file':('m.wav',wav)}).json()['primary']['label']=='異常'
+    assert client.post(f'/api/v1/projects/{pid}/images',data={'label':'正常'},files={'file':('bad.wav',b'RIFFnope')}).status_code==400
+    # Pass labels follow class edits.
+    assert client.patch(f'/api/v1/projects/{pid}',json={'pass_labels':['正常','不存在']}).status_code==422
+    client.post(f'/api/v1/projects/{pid}/classes',json={'name':'背景'})
+    assert client.patch(f'/api/v1/projects/{pid}',json={'pass_labels':['背景','正常']}).json()['pass_labels']==['正常','背景']
+    assert client.patch(f'/api/v1/projects/{pid}/classes/正常',json={'name':'運轉正常'}).json()['pass_labels']==['運轉正常','背景']
+    assert client.delete(f'/api/v1/projects/{pid}/classes/背景').json()['pass_labels']==['運轉正常']
+    archive=client.get(f'/api/v1/projects/{pid}/archive').content
+    with zipfile.ZipFile(io.BytesIO(archive)) as z: assert js.loads(z.read('project.json'))['images'][0]['file'].endswith('.wav')
+    imported=client.post('/api/v1/projects/import',files={'file':('a.zip',archive)}).json()
+    assert imported['task']=='audio' and imported['imported']==60 and imported['pass_labels']==['運轉正常']
+    img=client.post('/api/v1/projects',json={'name':'img'}).json()
+    assert client.patch(f'/api/v1/projects/{img["id"]}',json={'pass_labels':['NG']}).status_code==422
+    assert client.post('/api/v1/projects',json={'name':'a','task':'audio','labels':['x','y'],'pass_labels':['z']}).status_code==422
+
+def test_inspection_apps(client,monkeypatch):
+    login(client)
+    p=client.post('/api/v1/demo').json();pid=p['id']
+    job=client.post(f'/api/v1/projects/{pid}/train',json={'adapter':'baseline'}).json()
+    image=next(x for x in job['snapshot']['test'] if x['label']=='NG');raw=blob(image['key'])
+    r=client.post(f'/api/v1/projects/{pid}/apps',json={'name':'產線 A','slug':'產線A'});assert r.status_code==200,r.text
+    created=r.json();code=created['access_code'];aid=created['id']
+    assert len(code)==8 and 'access_hash' not in created and created['url'].endswith('/產線A')
+    assert client.post(f'/api/v1/projects/{pid}/apps',json={'name':'dup','slug':'產線A'}).status_code==409
+    assert client.post(f'/api/v1/projects/{pid}/apps',json={'name':'bad','slug':'a/b'}).status_code==422
+    assert 'access_code' not in client.get(f'/api/v1/projects/{pid}/apps').json()[0]
+    studio_cookie=client.cookies.get('aoi_session')
+    # The admin session is not an operator session.
+    assert client.get('/api/runtime/產線A/config').status_code==401
+    client.cookies.clear()
+    for _ in range(5): assert client.post('/api/runtime/產線A/login',json={'code':'00000000'}).status_code==401
+    assert client.post('/api/runtime/產線A/login',json={'code':code}).status_code==429
+    from app.core import update as db_update
+    db_update(aid,locked_until=0,failed=0)
+    r=client.post('/api/runtime/產線A/login',json={'code':code[:4]+'-'+code[4:]});assert r.status_code==200,r.text
+    app_token=r.json()['access_token']
+    assert client.get('/api/v1/projects',headers={'Authorization':'Bearer '+app_token}).status_code==401
+    cfg=client.get('/api/runtime/產線A/config').json();assert cfg['deployment'] is None and cfg['project']['pass_labels']==['OK']
+    assert client.post('/api/runtime/產線A/inspect',files={'file':('x.png',raw,'image/png')}).status_code==409
+    client.cookies.clear();client.cookies.set('aoi_session',studio_cookie)
+    client.post(f'/api/v1/projects/{pid}/deploy',json={'model_id':job['model_id'],'threshold':.5})
+    other=client.post(f'/api/v1/projects/{pid}/apps',json={'name':'B','slug':'line-b'}).json()
+    client.cookies.clear()
+    client.post('/api/runtime/產線A/login',json={'code':code})
+    cfg=client.get('/api/runtime/產線A/config').json();assert cfg['deployment']['model_version']==1 and cfg['deployment']['threshold']==.5
+    assert client.post('/api/runtime/產線A/preview',files={'file':('x.png',raw)}).json()['primary']['label']=='NG'
+    r=client.post('/api/runtime/產線A/inspect',data={'mode':'continuous'},files={'file':('x.png',raw)}).json()
+    assert r['result']=='FAIL' and r['trigger']=='continuous'
+    stats=client.get('/api/runtime/產線A/inspections').json();assert stats['today']['FAIL']==1 and stats['today']['total']==1
+    assert client.get(f'/api/runtime/產線A/inspections/{r["id"]}/thumbnail').status_code==200
+    rv=client.post(f'/api/runtime/產線A/inspections/{r["id"]}/review',json={'decision':'FAIL','note':'確認刮痕'}).json()
+    assert rv['review']['user_name']=='檢測 App · 產線 A'
+    # Another app's session cannot see this app's inspections.
+    assert client.get(f'/api/runtime/line-b/inspections/{r["id"]}/thumbnail').status_code==401
+    client.post('/api/runtime/line-b/login',json={'code':other['access_code']})
+    assert client.get(f'/api/runtime/line-b/inspections/{r["id"]}/thumbnail').status_code==404
+    assert client.get('/api/runtime/line-b/inspections').json()['today']['total']==0
+    # Origin: runtime host is accepted only for runtime paths.
+    monkeypatch.setenv('RUNTIME_ORIGIN','https://inspect.example')
+    assert client.post('/api/runtime/產線A/preview',files={'file':('x.png',raw)},headers={'Origin':'https://inspect.example'}).status_code==200
+    assert client.post('/api/v1/projects',json={'name':'x'},headers={'Origin':'https://inspect.example'}).status_code==403
+    # Regenerating the code signs operators out; disabling hides the app.
+    client.cookies.clear();client.cookies.set('aoi_session',studio_cookie)
+    new_code=client.patch(f'/api/v1/apps/{aid}',json={'regenerate_code':True}).json()['access_code'];assert new_code!=code or len(new_code)==8
+    client.cookies.clear()
+    assert client.get('/api/runtime/產線A/config',headers={'Authorization':'Bearer '+app_token}).status_code==401
+    assert client.post('/api/runtime/產線A/login',json={'code':new_code}).status_code==200
+    client.cookies.clear();client.cookies.set('aoi_session',studio_cookie)
+    assert client.delete(f'/api/v1/apps/{aid}').status_code==200
+    assert client.post('/api/runtime/產線A/login',json={'code':new_code}).status_code==404
+    login(client)
+
+def test_project_trash_and_restore(client):
+    login(client)
+    p=client.post('/api/v1/demo').json();pid=p['id']
+    job=client.post(f'/api/v1/projects/{pid}/train',json={'adapter':'baseline'}).json()
+    client.post(f'/api/v1/projects/{pid}/deploy',json={'model_id':job['model_id'],'threshold':.5})
+    code=client.post(f'/api/v1/projects/{pid}/apps',json={'name':'trash','slug':'trash-app'}).json()['access_code']
+    assert client.patch(f'/api/v1/projects/{pid}',json={'name':'改名後'}).json()['name']=='改名後'
+    image=client.get(f'/api/v1/projects/{pid}/overview').json()['image'][0]
+    assert client.delete(f'/api/v1/projects/{pid}').json()['deleted'] is True
+    assert pid not in [x['id'] for x in client.get('/api/v1/projects').json()]
+    assert [x['id'] for x in client.get('/api/v1/projects/trash').json()][0]==pid
+    assert client.get(f'/api/v1/projects/{pid}/overview').status_code==404
+    assert client.get(f'/api/v1/images/{image["id"]}/content').status_code==404
+    assert client.post('/api/v1/inference',data={'project_id':pid},files={'file':('x.png',blob(image['key']))}).status_code==404
+    assert client.post('/api/runtime/trash-app/login',json={'code':code}).status_code==404
+    assert client.delete(f'/api/v1/projects/{pid}').status_code==404
+    r=client.post(f'/api/v1/projects/{pid}/restore').json();assert r['deleted'] is False and r['active_deployment']
+    assert client.get(f'/api/v1/projects/{pid}/overview').json()['project']['name']=='改名後'
+    assert pid not in [x['id'] for x in client.get('/api/v1/projects/trash').json()]
+    assert client.post('/api/runtime/trash-app/login',json={'code':code}).status_code==200
+    client.cookies.clear();login(client)
+    other=new('user',{'username':'trash-other','password':password_hash('other-password-123')})
+    login(client,'trash-other','other-password-123')
+    assert client.delete(f'/api/v1/projects/{pid}').status_code==403 and client.post(f'/api/v1/projects/{pid}/restore').status_code==403
+    login(client)
